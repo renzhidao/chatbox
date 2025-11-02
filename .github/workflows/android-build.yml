@@ -156,7 +156,6 @@ jobs:
 
       - name: Verify Capacitor sync completed
         run: |
-          # Capacitor 可能使用 public 或 www 作为资源目录
           ASSETS_BASE="android/app/src/main/assets"
           
           if [ -d "$ASSETS_BASE/public" ]; then
@@ -181,6 +180,28 @@ jobs:
           echo "✅ Capacitor sync verified"
           echo "Assets location: $ANDROID_ASSETS"
           echo "Assets size: $(du -sh "$ANDROID_ASSETS" | cut -f1)"
+
+      - name: Debug - Check synced assets
+        run: |
+          echo "=== Capacitor config ==="
+          cat capacitor.config.ts
+          echo ""
+          echo "=== Android assets directory content ==="
+          ls -lh android/app/src/main/assets/public/ | head -30
+          echo ""
+          echo "=== Check for index.html ==="
+          if [ -f "android/app/src/main/assets/public/index.html" ]; then
+            echo "✅ index.html exists"
+            echo "Size: $(ls -lh android/app/src/main/assets/public/index.html | awk '{print $5}')"
+          else
+            echo "❌ index.html NOT found!"
+          fi
+          echo ""
+          echo "=== Check assets subdirectories ==="
+          du -sh android/app/src/main/assets/public/* 2>/dev/null || true
+          echo ""
+          echo "=== Original build output size breakdown ==="
+          du -sh release/app/dist/renderer/* 2>/dev/null | sort -rh | head -20
 
       - name: Prepare release keystore
         run: |
