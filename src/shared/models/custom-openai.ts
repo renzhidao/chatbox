@@ -1,3 +1,4 @@
+typescript
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { extractReasoningMiddleware, wrapLanguageModel } from 'ai'
 import type { ProviderModelInfo } from '../types'
@@ -86,7 +87,23 @@ export default class CustomOpenAI extends AbstractAISDKModel {
   }
 
   protected getImageModel() {
-    // Custom OpenAI providers typically don't support image generation
-    return null
+    const provider = createOpenAICompatible({
+      name: this.name,
+      apiKey: this.options.apiKey,
+      baseURL: this.options.apiHost,
+      fetch: createFetchWithProxy(this.options.useProxy, this.dependencies),
+      headers: this.options.apiHost.includes('openrouter.ai')
+        ? {
+            'HTTP-Referer': 'https://chatboxai.app',
+            'X-Title': 'Chatbox AI',
+          }
+        : this.options.apiHost.includes('aihubmix.com')
+          ? {
+              'APP-Code': 'VAFU9221',
+            }
+          : undefined,
+    })
+    // 返回一个默认的图片模型ID。如果您的自定义API需要不同的模型ID，请修改 'dall-e-3' 这个字符串。
+    return provider.image('dall-e-3')
   }
 }

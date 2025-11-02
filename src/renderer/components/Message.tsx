@@ -1,3 +1,4 @@
+typescript
 import NiceModal from '@ebay/nice-modal-react'
 import { ActionIcon, type ActionIconProps, Flex, Loader, Text, Tooltip as Tooltip1 } from '@mantine/core'
 import { Alert, Grid, Typography, useTheme } from '@mui/material'
@@ -63,6 +64,16 @@ interface Props {
   preferCollapsedCodeBlock?: boolean
   assistantAvatarKey?: string
   sessionPicUrl?: string
+}
+
+function formatMillisecondsToMinSec(ms?: number): string {
+  if (typeof ms !== 'number') {
+    return '未知'
+  }
+  const totalSeconds = Math.round(ms / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}分${seconds}秒`
 }
 
 const _Message: FC<Props> = (props) => {
@@ -175,35 +186,27 @@ const _Message: FC<Props> = (props) => {
   const tips: string[] = []
   if (props.sessionType === 'chat' || !props.sessionType) {
     if (showWordCount && !msg.generating) {
-      // 兼容旧版本没有提前计算的消息
-      tips.push(`word count: ${msg.wordCount !== undefined ? msg.wordCount : countWord(getMessageText(msg))}`)
-    }
-    if (showTokenCount && !msg.generating) {
-      // 兼容旧版本没有提前计算的消息
-      // if (msg.tokenCount === undefined) {
-      //   msg.tokenCount = estimateTokensFromMessages([msg])
-      // }
-      tips.push(`token count: ${msg.tokenCount}`)
+      tips.push(`字数: ${msg.wordCount !== undefined ? msg.wordCount : countWord(getMessageText(msg))}`)
     }
     if (showTokenUsed && msg.role === 'assistant' && !msg.generating) {
-      tips.push(`tokens used: ${msg.tokensUsed || 'unknown'}`)
+      tips.push(`令牌消耗: ${msg.tokensUsed || '未知'}`)
     }
     if (showFirstTokenLatency && msg.role === 'assistant' && !msg.generating) {
-      const latency = msg.firstTokenLatency ? `${msg.firstTokenLatency}ms` : 'unknown'
-      tips.push(`first token latency: ${latency}`)
+      const latency = formatMillisecondsToMinSec(msg.firstTokenLatency)
+      tips.push(`首字耗时: ${latency}`)
     }
     if (showModelName && props.msg.role === 'assistant') {
-      tips.push(`model: ${props.msg.model || 'unknown'}`)
+      tips.push(`模型: ${props.msg.model || '未知'}`)
     }
   } else if (props.sessionType === 'picture') {
     if (showModelName && props.msg.role === 'assistant') {
-      tips.push(`model: ${props.msg.model || 'unknown'}`)
-      tips.push(`style: ${props.msg.style || 'unknown'}`)
+      tips.push(`模型: ${props.msg.model || '未知'}`)
+      tips.push(`风格: ${props.msg.style || '未知'}`)
     }
   }
 
   if (msg.finishReason && ['content-filter', 'length', 'error'].includes(msg.finishReason)) {
-    tips.push(`finish reason: ${msg.finishReason}`)
+    tips.push(`结束原因: ${msg.finishReason}`)
   }
 
   // 消息时间戳
@@ -211,17 +214,14 @@ const _Message: FC<Props> = (props) => {
     const date = new Date(msg.timestamp)
     let messageTimestamp: string
     if (dateFns.isToday(date)) {
-      // - 当天，显示 HH:mm
       messageTimestamp = dateFns.format(date, 'HH:mm')
     } else if (dateFns.isThisYear(date)) {
-      // - 当年，显示 MM-dd HH:mm
       messageTimestamp = dateFns.format(date, 'MM-dd HH:mm')
     } else {
-      // - 其他年份：yyyy-MM-dd HH:mm
       messageTimestamp = dateFns.format(date, 'yyyy-MM-dd HH:mm')
     }
 
-    tips.push(`time: ${messageTimestamp}`)
+    tips.push(`时间: ${messageTimestamp}`)
   }
 
   // 是否需要渲染 Aritfact 组件
@@ -266,7 +266,6 @@ const _Message: FC<Props> = (props) => {
             },
           ]
         : []),
-      // 开发环境添加测试错误按钮
       ...(process.env.NODE_ENV === 'development'
         ? [
             {
@@ -351,8 +350,6 @@ const _Message: FC<Props> = (props) => {
                   <ReasoningContentUI message={msg} onCopyReasoningContent={onCopyReasoningContent} />
                 )}
                 {
-                  // 这里的空行仅仅是为了在只发送文件时消息气泡的美观
-                  // 正常情况下，应该考虑优化 msg-content 的样式。现在这里是一个临时的偷懒方式。
                   getMessageText(msg, true, true).trim() === '' && <p></p>
                 }
                 {contentParts && contentParts.length > 0 && (
@@ -467,7 +464,6 @@ const _Message: FC<Props> = (props) => {
               )}
             </div>
 
-            {/* actions */}
             {buttonGroup !== 'none' && !msg.generating && (
               <Flex
                 gap={0}
@@ -487,9 +483,7 @@ const _Message: FC<Props> = (props) => {
                 )}
 
                 {
-                  // Chatbox-AI 模型不支持编辑消息
                   !msg.model?.startsWith('Chatbox-AI') &&
-                    // 图片会话中，助手消息无需编辑
                     !(msg.role === 'assistant' && props.sessionType === 'picture') && (
                       <MessageActionIcon icon={IconPencil} tooltip={t('edit')} onClick={onEditClick} />
                     )
@@ -565,7 +559,6 @@ const PictureGallery = memo(({ pictures, onReport }: PictureGalleryProps) => {
             if (!base64) {
               return
             }
-            // storageKey中含有冒号，会在android端导致存储失败，且android端在同文件名的情况下不会再次保存图片，也无提示，可能对用户造成困扰，所以增加随机后缀
             const filename =
               platform.type === 'mobile'
                 ? `${picture.storageKey.replaceAll(':', '_')}_${Math.random().toString(36).substring(7)}`
