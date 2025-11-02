@@ -202,6 +202,12 @@ jobs:
           echo ""
           echo "=== Original build output size breakdown ==="
           du -sh release/app/dist/renderer/* 2>/dev/null | sort -rh | head -20
+          echo ""
+          echo "=== CRITICAL: Check for JavaScript files ==="
+          find android/app/src/main/assets/public/assets -name "*.js" | head -20
+          echo ""
+          echo "=== Directory structure of assets ==="
+          ls -R android/app/src/main/assets/public/assets/ | head -50
 
       - name: Prepare release keystore
         run: |
