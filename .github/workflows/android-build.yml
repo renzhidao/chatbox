@@ -1,0 +1,115 @@
+name: Build Chatbox v8
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths-ignore:
+      - "**.md"
+
+jobs:
+  build-android-arm64:
+    name: Build Android (arm64-v8a)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js v20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Create capacitor.config.ts from project info
+        run: |
+          echo "import { CapacitorConfig } from '@capacitor/cli';" > capacitor.config.ts
+          echo "const config: CapacitorConfig = {" >> capacitor.config.ts
+          echo "  appId: 'xyz.chatboxapp.ce'," >> capacitor.config.ts
+          echo "  appName: 'Chatbox'," >> capacitor.config.ts
+          echo "  webDir: 'dist'," >> capacitor.config.ts
+          echo "  bundledWebRuntime: false," >> capacitor.config.ts
+          echo "  plugins: { CapacitorHttp: { enabled: true } }," >> capacitor.config.ts
+          echo "};" >> capacitor.config.ts
+          echo "export default config;" >> capacitor.config.ts
+          echo "capacitor.config.ts created successfully."
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Add Android platform (auto-generate files)
+        run: npx cap add android
+
+      - name: Build web assets
+        # 从 package.json 中提取 build:renderer 命令，确保准确性
+        run: npm run build:renderer
+
+      - name: Sync Capacitor assets
+        run: npx cap sync android
+
+      - name: Prepare release keystore (auto-generate if no secret)
+        run: |
+          set -e
+          if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
+            echo "Using secrets for release signing."
+            echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
+            {
+              echo "storeFile=upload-keystore.jks"
+              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
+              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
+              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+            } > android/key.properties
+          else
+            echo "Secrets not found. Generating a temporary keystore for build."
+            keytool -genkey -v -keystore android/app/upload-keystore.jks \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -dname "CN=Android Debug, O=Android, C=US"
+            {
+              echo "storeFile=upload-keystore.jks"
+              echo "storePassword=android"
+              echo "keyAlias=androiddebugkey"
+              echo "keyPassword=android"
+            } > android/key.properties
+          fi
+
+      - name: Build arm64-v8a APK
+        run: |
+          cd android
+          ./gradlew assembleRelease -PcdvBuildArch=arm64
+          cd ..
+      
+      - name: Find and Rename APK
+        id: find_apk
+        run: |
+          set -e
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "app-arm64-release.apk")
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::arm64-v8a APK not found!"
+            exit 1
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          mkdir -p artifacts
+          # 使用 package.json 中的 productName 作为 APK 文件名的一部分
+          PRODUCT_NAME=$(node -p "require('./package.json').productName || 'chatbox'")
+          NEW_NAME="${PRODUCT_NAME}-android-${VERSION}-arm64-v8a.apk"
+          mv "$APK_PATH" "artifacts/$NEW_NAME"
+          echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: chatbox-android-arm64-v8a
+          path: artifacts/${{ steps.find_apk.outputs.apk_name }}
+          if-no-files-found: error
