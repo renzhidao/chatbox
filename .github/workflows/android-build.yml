@@ -35,23 +35,31 @@ jobs:
           echo "  plugins: { CapacitorHttp: { enabled: true } }," >> capacitor.config.ts
           echo "};" >> capacitor.config.ts
           echo "export default config;" >> capacitor.config.ts
-          echo "capacitor.config.ts created successfully."
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install dependencies (ignore scripts)
+        run: npm install --ignore-scripts
+
+      - name: Apply dependency patches
+        run: npx patch-package
 
       - name: Add Android platform (auto-generate .gradle files)
         run: npx cap add android
       
-      # 关键修正：将 Java/Gradle 设置移到 Android 平台添加之后
       - name: Setup Java JDK 17 and Gradle Cache
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle' # 现在可以安全地缓存 Gradle
+          cache: 'gradle'
 
-      - name: Build web assets
+      # 最终决定性修正：自动接受 Android SDK 许可协议，防止原生编译失败
+      - name: Accept Android SDK Licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+
+      - name: Build web assets for Mobile
+        env:
+          CHATBOX_BUILD_TARGET: mobile_app
+          CHATBOX_BUILD_PLATFORM: android
         run: npm run build:renderer
 
       - name: Sync Capacitor assets
