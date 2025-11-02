@@ -75,9 +75,6 @@ jobs:
 
       - name: Add Android platform
         run: npx cap add android
-
-      - name: Generate Android assets
-        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, using defaults"
       
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
@@ -133,6 +130,9 @@ jobs:
           key: ${{ runner.os }}-auto-keystore
           restore-keys: |
             ${{ runner.os }}-auto-keystore
+
+      - name: Generate Android assets
+        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, using defaults"
 
       - name: Accept SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
@@ -258,6 +258,78 @@ jobs:
           else
             echo "✅ Synced HTML verified: no %PUBLIC_URL% placeholders"
           fi
+
+      - name: Complete Android diagnostics
+        shell: bash
+        run: |
+          set +e
+          echo "======================================"
+          echo "=== COMPLETE ANDROID DIAGNOSTICS ==="
+          echo "======================================"
+          
+          echo ""
+          echo "=== 1. Capacitor Config ==="
+          cat capacitor.config.ts || true
+          echo ""
+          cat android/app/src/main/assets/capacitor.config.json 2>/dev/null || echo "capacitor.config.json not found"
+          
+          echo ""
+          echo "=== 2. Synced index.html Analysis ==="
+          SYNCED_HTML="android/app/src/main/assets/public/index.html"
+          if [ -f "$SYNCED_HTML" ]; then
+            echo "File size: $(wc -c < "$SYNCED_HTML") bytes"
+            echo "File lines: $(wc -l < "$SYNCED_HTML")"
+            echo ""
+            echo "--- First 3000 chars of synced HTML ---"
+            head -c 3000 "$SYNCED_HTML"
+            echo ""
+            echo "--- END of first 3000 chars ---"
+            echo ""
+            echo "--- All script tags ---"
+            grep -o '<script[^>]*>' "$SYNCED_HTML" || echo "No script tags"
+            echo ""
+            echo "--- JS file references ---"
+            grep -o 'src="[^"]*\.js"' "$SYNCED_HTML" | head -10 || echo "No JS src found"
+            echo ""
+            echo "--- CSS file references ---"
+            grep -o 'href="[^"]*\.css"' "$SYNCED_HTML" || echo "No CSS href found"
+            echo ""
+            echo "--- Check for %PUBLIC_URL% ---"
+            if grep -q "%PUBLIC_URL%" "$SYNCED_HTML"; then
+              echo "❌ FOUND %PUBLIC_URL%"
+              grep "%PUBLIC_URL%" "$SYNCED_HTML"
+            else
+              echo "✅ No %PUBLIC_URL% found"
+            fi
+          else
+            echo "❌ Synced HTML not found at: $SYNCED_HTML"
+          fi
+          
+          echo ""
+          echo "=== 3. JavaScript Files in Assets ==="
+          JS_COUNT=$(find android/app/src/main/assets/public -name "*.js" 2>/dev/null | wc -l || echo "0")
+          echo "Total JS files: $JS_COUNT"
+          if [ "$JS_COUNT" -gt 0 ]; then
+            echo "Main JS file:"
+            find android/app/src/main/assets/public -name "main*.js" 2>/dev/null || echo "No main.js found"
+            echo ""
+            echo "Sample JS files (first 10):"
+            find android/app/src/main/assets/public -name "*.js" 2>/dev/null | head -10 || true
+          else
+            echo "❌ No JavaScript files found!"
+          fi
+          
+          echo ""
+          echo "=== 4. MainActivity ==="
+          find android/app/src/main -name "MainActivity.*" 2>/dev/null || echo "MainActivity not found"
+          
+          echo ""
+          echo "=== 5. App Icons ==="
+          ls android/app/src/main/res/mipmap-hdpi/ 2>/dev/null | head -5 || echo "No icons"
+          
+          echo ""
+          echo "======================================"
+          set -e
 
       - name: Prepare release keystore with caching
         run: |
