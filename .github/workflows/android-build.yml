@@ -1,4 +1,4 @@
-name: Build Chatbox v8
+name: Build Chatbox Android APK (arm64-v8a)
 
 on:
   workflow_dispatch:
@@ -24,13 +24,6 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Setup Java JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
-
       - name: Create capacitor.config.ts from project info
         run: |
           echo "import { CapacitorConfig } from '@capacitor/cli';" > capacitor.config.ts
@@ -47,11 +40,18 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Add Android platform (auto-generate files)
+      - name: Add Android platform (auto-generate .gradle files)
         run: npx cap add android
+      
+      # 关键修正：将 Java/Gradle 设置移到 Android 平台添加之后
+      - name: Setup Java JDK 17 and Gradle Cache
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle' # 现在可以安全地缓存 Gradle
 
       - name: Build web assets
-        # 从 package.json 中提取 build:renderer 命令，确保准确性
         run: npm run build:renderer
 
       - name: Sync Capacitor assets
@@ -101,7 +101,6 @@ jobs:
           fi
           VERSION=$(node -p "require('./package.json').version")
           mkdir -p artifacts
-          # 使用 package.json 中的 productName 作为 APK 文件名的一部分
           PRODUCT_NAME=$(node -p "require('./package.json').productName || 'chatbox'")
           NEW_NAME="${PRODUCT_NAME}-android-${VERSION}-arm64-v8a.apk"
           mv "$APK_PATH" "artifacts/$NEW_NAME"
