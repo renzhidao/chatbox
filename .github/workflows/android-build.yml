@@ -24,17 +24,19 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Create capacitor.config.ts from project info
+      - name: Create capacitor.config.ts
         run: |
-          echo "import { CapacitorConfig } from '@capacitor/cli';" > capacitor.config.ts
-          echo "const config: CapacitorConfig = {" >> capacitor.config.ts
-          echo "  appId: 'xyz.chatboxapp.ce'," >> capacitor.config.ts
-          echo "  appName: 'Chatbox'," >> capacitor.config.ts
-          echo "  webDir: 'dist'," >> capacitor.config.ts
-          echo "  bundledWebRuntime: false," >> capacitor.config.ts
-          echo "  plugins: { CapacitorHttp: { enabled: true } }," >> capacitor.config.ts
-          echo "};" >> capacitor.config.ts
-          echo "export default config;" >> capacitor.config.ts
+          cat > capacitor.config.ts << 'EOF'
+          import { CapacitorConfig } from '@capacitor/cli';
+          const config: CapacitorConfig = {
+            appId: 'xyz.chatboxapp.ce',
+            appName: 'Chatbox',
+            webDir: 'dist',
+            bundledWebRuntime: false,
+            plugins: { CapacitorHttp: { enabled: true } },
+          };
+          export default config;
+          EOF
 
       - name: Install dependencies (ignore scripts)
         run: npm install --ignore-scripts
@@ -53,60 +55,143 @@ jobs:
           cache: 'gradle'
 
       - name: Accept Android SDK Licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      # 最终、决定性的修正：执行项目自带的、完整的构建同步脚本，而不是拆分它
-      - name: Build Web Assets and Sync for Android
-        run: npm run mobile:sync:android
+      - name: Clean dist directory
+        run: rm -rf dist || true
 
-      - name: Prepare release keystore (auto-generate if no secret)
+      - name: Build web assets for Mobile
+        env:
+          CHATBOX_BUILD_TARGET: mobile_app
+          CHATBOX_BUILD_PLATFORM: android
+          NODE_ENV: production
+          TS_NODE_TRANSPILE_ONLY: 'true'
+        run: npm run build:renderer
+
+      - name: Delete source maps
+        run: find ./dist -type f -name "*.map" -delete || true
+
+      - name: Sync Capacitor assets
+        run: npx cap sync android
+
+      - name: Prepare release keystore
         run: |
           set -e
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
             echo "Using secrets for release signing."
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
-            {
-              echo "storeFile=upload-keystore.jks"
-              echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
-              echo "keyAlias=${{ secrets.KEY_ALIAS }}"
-              echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
-            } > android/key.properties
+            cat > android/key.properties << EOF
+          storeFile=upload-keystore.jks
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          EOF
           else
-            echo "Secrets not found. Generating a temporary keystore for build."
+            echo "Generating temporary keystore."
             keytool -genkey -v -keystore android/app/upload-keystore.jks \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -storepass android -keypass android \
               -alias androiddebugkey \
               -dname "CN=Android Debug, O=Android, C=US"
-            {
-              echo "storeFile=upload-keystore.jks"
-              echo "storePassword=android"
-              echo "keyAlias=androiddebugkey"
-              echo "keyPassword=android"
-            } > android/key.properties
+            cat > android/key.properties << EOF
+          storeFile=upload-keystore.jks
+          storePassword=android
+          keyAlias=androiddebugkey
+          keyPassword=android
+          EOF
           fi
+
+      - name: Create custom build configuration
+        run: |
+          cat > android/app/custom-build.gradle << 'GRADLE_EOF'
+          def keystorePropertiesFile = rootProject.file('key.properties')
+          def keystoreProperties = new Properties()
+          def hasKeystore = false
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+              hasKeystore = true
+          }
+          
+          afterEvaluate {
+              android {
+                  defaultConfig {
+                      ndk {
+                          abiFilters "arm64-v8a"
+                      }
+                  }
+                  
+                  splits {
+                      abi {
+                          enable false
+                      }
+                      density {
+                          enable false
+                      }
+                  }
+              }
+              
+              if (hasKeystore) {
+                  android {
+                      signingConfigs {
+                          release {
+                              storeFile file(keystoreProperties['storeFile'])
+                              storePassword keystoreProperties['storePassword']
+                              keyAlias keystoreProperties['keyAlias']
+                              keyPassword keystoreProperties['keyPassword']
+                          }
+                      }
+                      buildTypes {
+                          release {
+                              signingConfig signingConfigs.release
+                          }
+                      }
+                  }
+              }
+          }
+          GRADLE_EOF
+          
+          echo "" >> android/app/build.gradle
+          echo "apply from: 'custom-build.gradle'" >> android/app/build.gradle
 
       - name: Build arm64-v8a APK
         run: |
           cd android
-          ./gradlew assembleRelease -PcdvBuildArch=arm64
+          ./gradlew assembleRelease --stacktrace
           cd ..
       
       - name: Find and Rename APK
         id: find_apk
         run: |
           set -e
-          APK_PATH=$(find android/app/build/outputs/apk/release -name "app-arm64-release.apk")
-          if [ -z "$APK_PATH" ]; then
-            echo "::error::arm64-v8a APK not found!"
-            exit 1
+          
+          # 首先尝试标准的固定路径（最高效）
+          STANDARD_APK="android/app/build/outputs/apk/release/app-release.apk"
+          
+          if [ -f "$STANDARD_APK" ]; then
+            echo "Found APK at standard path: $STANDARD_APK"
+            APK_PATH="$STANDARD_APK"
+          else
+            # 兜底：使用 find 搜索（容错处理）
+            echo "Standard path not found, searching for APK..."
+            APK_PATH=$(find android/app/build/outputs/apk/release -type f \
+              \( -name "app-release.apk" -o -name "*-release.apk" \) \
+              ! -name "*unsigned*" | head -n 1)
+            
+            if [ -z "$APK_PATH" ]; then
+              echo "::error::APK not found! Available files:"
+              find android/app/build/outputs -type f
+              exit 1
+            fi
+            echo "Found APK via search: $APK_PATH"
           fi
+          
           VERSION=$(node -p "require('./package.json').version")
           mkdir -p artifacts
           PRODUCT_NAME=$(node -p "require('./package.json').productName || 'chatbox'")
           NEW_NAME="${PRODUCT_NAME}-android-${VERSION}-arm64-v8a.apk"
-          mv "$APK_PATH" "artifacts/$NEW_NAME"
+          cp "$APK_PATH" "artifacts/$NEW_NAME"
           echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "APK packaged as: $NEW_NAME"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
