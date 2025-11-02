@@ -44,14 +44,6 @@ jobs:
             plugins: {
               CapacitorHttp: { enabled: true },
             },
-            server: {
-              allowNavigation: [
-                'www.googletagmanager.com',
-                'plausible.midway.run',
-                '*.chatboxai.app',
-                '*.midway.run'
-              ],
-            },
           };
           
           export default config;
@@ -159,7 +151,7 @@ jobs:
           [ -f "release/app/dist/renderer/index.html" ] || { echo "::error::index.html missing"; exit 1; }
           echo "✅ Build verified ($(du -sh release/app/dist/renderer | cut -f1))"
 
-      - name: Remove external scripts and source maps for mobile
+      - name: Fix HTML for mobile (remove scripts & fix placeholders)
         run: |
           set -e
           
@@ -167,12 +159,9 @@ jobs:
           echo "Removing source maps..."
           find ./release/app/dist/renderer -name "*.map" -delete 2>/dev/null || true
           
-          # 使用 Python 精确移除外部脚本（支持压缩HTML）
           INDEX_HTML="release/app/dist/renderer/index.html"
           if [ -f "$INDEX_HTML" ]; then
-            echo "Processing index.html to remove external analytics scripts..."
-            
-            # 备份
+            echo "Processing index.html for mobile compatibility..."
             cp "$INDEX_HTML" "${INDEX_HTML}.backup"
             
             python3 << 'PYTHON_EOF'
@@ -191,19 +180,18 @@ jobs:
               
               original_size = len(content)
               
-              # 定义要删除的脚本模式
+              # 1. 替换 %PUBLIC_URL% 占位符为相对路径
+              public_url_count = content.count('%PUBLIC_URL%')
+              content = content.replace('%PUBLIC_URL%', '.')
+              
+              # 2. 删除外部分析脚本
               patterns = [
-                  # Google Analytics 加载脚本
                   r'<script async src="https://www\.googletagmanager\.com/gtag/js[^"]*"></script>',
-                  # Plausible 加载脚本
                   r'<script\s+defer[^>]*plausible\.midway\.run[^>]*></script>',
-                  # Plausible 初始化脚本
                   r'<script>window\.plausible\s*=[\s\S]*?</script>',
-                  # Google Analytics 初始化脚本
                   r'<script>window\.dataLayer\s*=[\s\S]*?</script>',
               ]
               
-              # 依次删除所有匹配的脚本
               for pattern in patterns:
                   content = re.sub(pattern, '', content, flags=re.DOTALL)
               
@@ -212,7 +200,8 @@ jobs:
                   f.write(content)
               
               removed_size = original_size - len(content)
-              print(f"✅ External scripts removed from index.html")
+              print(f"✅ HTML processed for mobile")
+              print(f"   Replaced %PUBLIC_URL%: {public_url_count} occurrences")
               print(f"   Original size: {original_size} bytes")
               print(f"   New size: {len(content)} bytes")
               print(f"   Removed: {removed_size} bytes")
@@ -227,16 +216,17 @@ jobs:
             
             echo ""
             echo "Verification:"
-            if grep -q "googletagmanager.com" "$INDEX_HTML"; then
-              echo "::warning::Google Analytics still present"
+            if grep -q "%PUBLIC_URL%" "$INDEX_HTML"; then
+              echo "::error::%PUBLIC_URL% still present!"
+              exit 1
             else
-              echo "  ✅ Google Analytics removed"
+              echo "  ✅ %PUBLIC_URL% replaced"
             fi
             
-            if grep -q "plausible.midway.run" "$INDEX_HTML"; then
-              echo "::warning::Plausible Analytics still present"
+            if grep -q "googletagmanager.com\|plausible.midway.run" "$INDEX_HTML"; then
+              echo "::warning::External scripts still present"
             else
-              echo "  ✅ Plausible removed"
+              echo "  ✅ External scripts removed"
             fi
           else
             echo "::error::index.html not found!"
@@ -260,114 +250,14 @@ jobs:
           
           [ -f "$DIR/index.html" ] || { echo "::error::index.html not synced"; exit 1; }
           echo "✅ Sync verified ($(du -sh "$DIR" | cut -f1))"
-
-      - name: Complete Android diagnostics
-        shell: bash
-        run: |
-          set +e
-          echo "======================================"
-          echo "=== COMPLETE ANDROID DIAGNOSTICS ==="
-          echo "======================================"
           
-          echo ""
-          echo "=== 1. Capacitor Configs ==="
-          echo "--- TypeScript Config ---"
-          cat capacitor.config.ts || true
-          echo ""
-          echo "--- Runtime JSON Config ---"
-          cat android/app/src/main/assets/capacitor.config.json 2>/dev/null || echo "❌ Not found"
-          
-          echo ""
-          echo "=== 2. Verify External Scripts Removal ==="
-          SYNCED_HTML="android/app/src/main/assets/public/index.html"
-          if [ -f "$SYNCED_HTML" ]; then
-            echo "Checking synced index.html for external scripts..."
-            if grep -q "googletagmanager.com" "$SYNCED_HTML"; then
-              echo "❌ CRITICAL: Google Analytics still in synced HTML!"
-            else
-              echo "✅ Google Analytics removed from synced HTML"
-            fi
-            
-            if grep -q "plausible.midway.run" "$SYNCED_HTML"; then
-              echo "❌ CRITICAL: Plausible still in synced HTML!"
-            else
-              echo "✅ Plausible removed from synced HTML"
-            fi
-            
-            echo ""
-            echo "=== 2.1. CRITICAL: Synced index.html Content Analysis ==="
-            echo "File size: $(wc -c < "$SYNCED_HTML") bytes"
-            echo "File lines: $(wc -l < "$SYNCED_HTML")"
-            echo ""
-            echo "--- First 3000 chars of synced index.html ---"
-            head -c 3000 "$SYNCED_HTML"
-            echo ""
-            echo "--- END of first 3000 chars ---"
-            echo ""
-            echo "--- DOCTYPE and HTML tag ---"
-            head -c 200 "$SYNCED_HTML"
-            echo ""
-            echo ""
-            echo "--- All script src attributes ---"
-            grep -o 'src="[^"]*"' "$SYNCED_HTML" | grep -v '\.css' | head -30 || echo "No src attributes found"
-            echo ""
-            echo "--- Check for main JS file reference ---"
-            if grep -q 'src="[^"]*\.js"' "$SYNCED_HTML"; then
-              echo "✅ JS file references found:"
-              grep -o 'src="[^"]*\.js"' "$SYNCED_HTML" | head -10
-            else
-              echo "❌ CRITICAL: No JS file references found!"
-            fi
-            echo ""
-            echo "--- Check for base tag (affects resource paths) ---"
-            if grep -q '<base' "$SYNCED_HTML"; then
-              echo "⚠️ Base tag found:"
-              grep -o '<base[^>]*>' "$SYNCED_HTML"
-            else
-              echo "✅ No base tag (paths are relative)"
-            fi
-            echo ""
-            echo "--- Count of different resource types ---"
-            echo "Script tags: $(grep -o '<script' "$SYNCED_HTML" | wc -l)"
-            echo "Link tags: $(grep -o '<link' "$SYNCED_HTML" | wc -l)"
-            echo "Img tags: $(grep -o '<img' "$SYNCED_HTML" | wc -l)"
-          fi
-          
-          echo ""
-          echo "=== 3. MainActivity Search ==="
-          MAIN_JAVA=$(find android/app/src/main -name "MainActivity.java" 2>/dev/null || true)
-          MAIN_KT=$(find android/app/src/main -name "MainActivity.kt" 2>/dev/null || true)
-          
-          if [ -n "$MAIN_JAVA" ]; then
-            echo "✅ Found Java: $MAIN_JAVA"
-          elif [ -n "$MAIN_KT" ]; then
-            echo "✅ Found Kotlin: $MAIN_KT"
+          # 最终验证：确保同步后的 HTML 也没有 %PUBLIC_URL%
+          if grep -q "%PUBLIC_URL%" "$DIR/index.html"; then
+            echo "::error::CRITICAL: %PUBLIC_URL% found in synced HTML!"
+            exit 1
           else
-            echo "❌ MainActivity not found"
+            echo "✅ Synced HTML verified: no %PUBLIC_URL% placeholders"
           fi
-          
-          echo ""
-          echo "=== 4. JavaScript Files Analysis ==="
-          JS_COUNT=$(find android/app/src/main/assets/public -name "*.js" 2>/dev/null | wc -l || echo "0")
-          echo "Total JS files: $JS_COUNT"
-          if [ "$JS_COUNT" -gt 0 ]; then
-            echo ""
-            echo "Sample JS files (first 10):"
-            find android/app/src/main/assets/public -name "*.js" 2>/dev/null | head -10 || true
-            echo ""
-            echo "Main JS file check:"
-            find android/app/src/main/assets/public -name "main*.js" 2>/dev/null || echo "No main*.js found"
-          else
-            echo "❌ CRITICAL: No JavaScript files found in assets!"
-          fi
-          
-          echo ""
-          echo "=== 5. App Icons Check ==="
-          ls android/app/src/main/res/mipmap-hdpi/ 2>/dev/null | head -5 || echo "⚠️ No custom icons"
-          
-          echo ""
-          echo "======================================"
-          set -e
 
       - name: Prepare release keystore with caching
         run: |
