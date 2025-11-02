@@ -31,7 +31,7 @@ jobs:
           const config: CapacitorConfig = {
             appId: 'xyz.chatboxapp.ce',
             appName: 'Chatbox',
-            webDir: 'dist',
+            webDir: 'release/app/dist/renderer',
             plugins: { CapacitorHttp: { enabled: true } },
           };
           export default config;
@@ -56,28 +56,25 @@ jobs:
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Clean dist directory (use project script)
-        run: npx ts-node ./.erb/scripts/clean.js dist
-
       - name: Build web assets for Mobile
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
           export CHATBOX_BUILD_PLATFORM=android
           npm run build:renderer
 
-      - name: Verify dist directory exists
+      - name: Verify build output exists
         run: |
-          if [ ! -d "dist" ]; then
-            echo "::error::dist directory not found after build!"
+          if [ ! -d "release/app/dist/renderer" ]; then
+            echo "::error::Build output not found at release/app/dist/renderer!"
             echo "Searching for build output..."
-            find . -type d -name "dist" -o -name "build" -o -name "renderer" 2>/dev/null || true
+            find . -type d -name "dist" -o -name "renderer" 2>/dev/null || true
             exit 1
           fi
-          echo "dist directory exists, contents:"
-          ls -la dist/
+          echo "Build output exists, contents:"
+          ls -la release/app/dist/renderer/
 
       - name: Delete source maps
-        run: find ./dist -type f -name "*.map" -delete 2>/dev/null || true
+        run: find ./release/app/dist/renderer -type f -name "*.map" -delete 2>/dev/null || true
 
       - name: Sync Capacitor assets
         run: npx cap sync android
