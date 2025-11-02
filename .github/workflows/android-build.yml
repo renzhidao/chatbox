@@ -24,6 +24,14 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-
+
       - name: Create capacitor.config.ts
         run: |
           cat > capacitor.config.ts << 'EOF'
@@ -53,6 +61,48 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
+      - name: Cache Gradle Wrapper
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            android/gradle/wrapper
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-wrapper-
+
+      - name: Cache Gradle Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/daemon
+          key: ${{ runner.os }}-gradle-deps-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-deps-
+
+      - name: Cache Gradle Build Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/.gradle
+            android/app/build
+          key: ${{ runner.os }}-gradle-build-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-build-
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.ANDROID_HOME }}/platforms
+            ${{ env.ANDROID_HOME }}/build-tools
+            ${{ env.ANDROID_HOME }}/platform-tools
+            ${{ env.ANDROID_HOME }}/cmdline-tools
+          key: ${{ runner.os }}-android-sdk-${{ hashFiles('android/app/build.gradle') }}
+          restore-keys: |
+            ${{ runner.os }}-android-sdk-
+
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
@@ -65,12 +115,9 @@ jobs:
       - name: Verify build output exists
         run: |
           if [ ! -d "release/app/dist/renderer" ]; then
-            echo "::error::Build output not found at release/app/dist/renderer!"
-            echo "Searching for build output..."
-            find . -type d -name "dist" -o -name "renderer" 2>/dev/null || true
+            echo "::error::Build output not found!"
             exit 1
           fi
-          echo "Build output exists, contents:"
           ls -la release/app/dist/renderer/
 
       - name: Delete source maps
@@ -106,62 +153,66 @@ jobs:
           EOF
           fi
 
-      - name: Create custom build configuration
+      - name: Configure build.gradle for arm64 and signing
         run: |
-          cat > android/app/custom-build.gradle << 'GRADLE_EOF'
+          BUILD_GRADLE="android/app/build.gradle"
+          
+          # 1. 在文件顶部添加读取 key.properties 的逻辑
+          cat > "${BUILD_GRADLE}.tmp" << 'HEADER_EOF'
           def keystorePropertiesFile = rootProject.file('key.properties')
           def keystoreProperties = new Properties()
-          def hasKeystore = false
           if (keystorePropertiesFile.exists()) {
               keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-              hasKeystore = true
           }
           
-          afterEvaluate {
-              android {
-                  defaultConfig {
-                      ndk {
-                          abiFilters "arm64-v8a"
-                      }
-                  }
-                  
-                  splits {
-                      abi {
-                          enable false
-                      }
-                      density {
-                          enable false
-                      }
-                  }
-              }
-              
-              if (hasKeystore) {
-                  android {
-                      signingConfigs {
-                          release {
-                              storeFile file(keystoreProperties['storeFile'])
-                              storePassword keystoreProperties['storePassword']
-                              keyAlias keystoreProperties['keyAlias']
-                              keyPassword keystoreProperties['keyPassword']
-                          }
-                      }
-                      buildTypes {
-                          release {
-                              signingConfig signingConfigs.release
-                          }
-                      }
-                  }
-              }
-          }
-          GRADLE_EOF
+          HEADER_EOF
+          cat "$BUILD_GRADLE" >> "${BUILD_GRADLE}.tmp"
+          mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
           
-          echo "" >> android/app/build.gradle
-          echo "apply from: 'custom-build.gradle'" >> android/app/build.gradle
+          # 2. 在 android { 后面立即插入 ndk 和 splits 配置（不使用 afterEvaluate）
+          sed -i '/^android {/a\
+              splits {\
+                  abi {\
+                      enable false\
+                  }\
+                  density {\
+                      enable false\
+                  }\
+              }' "$BUILD_GRADLE"
+          
+          # 3. 在 defaultConfig 中添加 ndk.abiFilters
+          sed -i '/defaultConfig {/a\
+              ndk {\
+                  abiFilters "arm64-v8a"\
+              }' "$BUILD_GRADLE"
+          
+          # 4. 在 android { 后添加签名配置
+          sed -i '/^android {/a\
+              if (keystorePropertiesFile.exists()) {\
+                  signingConfigs {\
+                      release {\
+                          storeFile file(keystoreProperties["storeFile"])\
+                          storePassword keystoreProperties["storePassword"]\
+                          keyAlias keystoreProperties["keyAlias"]\
+                          keyPassword keystoreProperties["keyPassword"]\
+                      }\
+                  }\
+              }' "$BUILD_GRADLE"
+          
+          # 5. 修改 release buildType 使用签名
+          sed -i '/buildTypes {/,/release {/{
+              /release {/a\
+                  if (keystorePropertiesFile.exists()) {\
+                      signingConfig signingConfigs.release\
+                  }
+          }' "$BUILD_GRADLE"
+          
+          echo "build.gradle configured successfully"
 
       - name: Build arm64-v8a APK
         run: |
           cd android
-          ./gradlew assembleRelease --stacktrace
+          ./gradlew assembleRelease --stacktrace --build-cache
           cd ..
       
       - name: Find and Rename APK
@@ -169,34 +220,29 @@ jobs:
         run: |
           set -e
           
-          # 首先尝试标准的固定路径（最高效）
           STANDARD_APK="android/app/build/outputs/apk/release/app-release.apk"
           
           if [ -f "$STANDARD_APK" ]; then
-            echo "Found APK at standard path: $STANDARD_APK"
             APK_PATH="$STANDARD_APK"
           else
-            # 兜底：使用 find 搜索（容错处理）
-            echo "Standard path not found, searching for APK..."
             APK_PATH=$(find android/app/build/outputs/apk/release -type f \
               \( -name "app-release.apk" -o -name "*-release.apk" \) \
               ! -name "*unsigned*" | head -n 1)
             
             if [ -z "$APK_PATH" ]; then
-              echo "::error::APK not found! Available files:"
+              echo "::error::APK not found!"
               find android/app/build/outputs -type f
               exit 1
             fi
-            echo "Found APK via search: $APK_PATH"
           fi
           
+          echo "Found APK: $APK_PATH"
           VERSION=$(node -p "require('./package.json').version")
           mkdir -p artifacts
           PRODUCT_NAME=$(node -p "require('./package.json').productName || 'chatbox'")
           NEW_NAME="${PRODUCT_NAME}-android-${VERSION}-arm64-v8a.apk"
           cp "$APK_PATH" "artifacts/$NEW_NAME"
           echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
-          echo "APK packaged as: $NEW_NAME"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
