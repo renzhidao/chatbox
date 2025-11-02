@@ -42,7 +42,7 @@ jobs:
       - name: Apply dependency patches
         run: npx patch-package
 
-      - name: Add Android platform (auto-generate .gradle files)
+      - name: Add Android platform
         run: npx cap add android
       
       - name: Setup Java JDK 17 and Gradle Cache
@@ -52,18 +52,12 @@ jobs:
           java-version: '17'
           cache: 'gradle'
 
-      # 最终决定性修正：自动接受 Android SDK 许可协议，防止原生编译失败
       - name: Accept Android SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses
 
-      - name: Build web assets for Mobile
-        env:
-          CHATBOX_BUILD_TARGET: mobile_app
-          CHATBOX_BUILD_PLATFORM: android
-        run: npm run build:renderer
-
-      - name: Sync Capacitor assets
-        run: npx cap sync android
+      # 最终、决定性的修正：执行项目自带的、完整的构建同步脚本，而不是拆分它
+      - name: Build Web Assets and Sync for Android
+        run: npm run mobile:sync:android
 
       - name: Prepare release keystore (auto-generate if no secret)
         run: |
