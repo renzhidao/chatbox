@@ -44,34 +44,38 @@ jobs:
           };
           export default config;
           EOF
+          echo "✅ Created capacitor.config.ts"
 
-      - name: Install dependencies (ignore scripts)
+      - name: Install dependencies (without scripts)
         run: npm install --ignore-scripts
 
-      - name: Apply dependency patches
-        run: npx patch-package
+      - name: Apply patches
+        run: npx patch-package || echo "::warning::Patch warnings (non-critical)"
 
-      - name: Install Sharp (for icon generation)
+      - name: Install and verify Sharp
         run: |
-          if npm install sharp --ignore-scripts=false; then
-            echo "✅ Sharp installed successfully"
+          echo "Installing Sharp..."
+          if npm install sharp; then
+            echo "Rebuilding Sharp native bindings..."
+            npm rebuild sharp || echo "::warning::Sharp rebuild failed"
+            
+            echo "Verifying Sharp..."
+            if node -e "require('sharp')" 2>/dev/null; then
+              echo "✅ Sharp is ready"
+            else
+              echo "::warning::Sharp verification failed - will use default icons"
+            fi
           else
-            echo "::warning::Sharp installation failed, default icons will be used"
+            echo "::warning::Sharp install failed - will use default icons"
           fi
 
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Generate mobile assets (icons and splash screens)
-        run: |
-          if npm run mobile:assets; then
-            echo "✅ Custom icons and splash screens generated"
-            ls -la android/app/src/main/res/mipmap-* 2>/dev/null || true
-          else
-            echo "::warning::Custom assets generation failed, using default Capacitor icons"
-          fi
+      - name: Generate Android assets
+        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, using defaults"
       
-      - name: Setup Java JDK 17 and Gradle Cache
+      - name: Setup Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
@@ -94,17 +98,17 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/daemon
-          key: ${{ runner.os }}-gradle-deps-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          key: ${{ runner.os }}-gradle-deps-${{ hashFiles('android/**/*.gradle*') }}
           restore-keys: |
             ${{ runner.os }}-gradle-deps-
 
-      - name: Cache Gradle Build Cache
+      - name: Cache Gradle Build
         uses: actions/cache@v4
         with:
           path: |
             android/.gradle
             android/app/build
-          key: ${{ runner.os }}-gradle-build-${{ github.sha }}
+          key: ${{ runner.os }}-gradle-build-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
           restore-keys: |
             ${{ runner.os }}-gradle-build-
 
@@ -114,16 +118,22 @@ jobs:
           path: |
             ${{ env.ANDROID_HOME }}/platforms
             ${{ env.ANDROID_HOME }}/build-tools
-            ${{ env.ANDROID_HOME }}/platform-tools
-            ${{ env.ANDROID_HOME }}/cmdline-tools
-          key: ${{ runner.os }}-android-sdk-${{ hashFiles('android/app/build.gradle') }}
+          key: ${{ runner.os }}-android-sdk
           restore-keys: |
             ${{ runner.os }}-android-sdk-
 
-      - name: Accept Android SDK Licenses
+      - name: Cache auto-generated keystore
+        uses: actions/cache@v4
+        with:
+          path: .github/cache/upload-keystore.jks
+          key: ${{ runner.os }}-auto-keystore
+          restore-keys: |
+            ${{ runner.os }}-auto-keystore
+
+      - name: Accept SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
-      - name: Build web assets for Mobile
+      - name: Build web assets
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
           export CHATBOX_BUILD_PLATFORM=android
@@ -131,201 +141,313 @@ jobs:
           export TS_NODE_TRANSPILE_ONLY=true
           npm run build:renderer
 
-      - name: Verify build output exists
+      - name: Verify build output
         run: |
-          WEB_DIR="release/app/dist/renderer"
-          
-          if [ ! -d "$WEB_DIR" ]; then
-            echo "::error::Web directory $WEB_DIR not found!"
-            exit 1
-          fi
-          
-          if [ ! -f "$WEB_DIR/index.html" ]; then
-            echo "::error::index.html not found in $WEB_DIR!"
-            exit 1
-          fi
-          
-          echo "✅ Build output verified: $WEB_DIR"
-          echo "Build size: $(du -sh "$WEB_DIR" | cut -f1)"
+          [ -d "release/app/dist/renderer" ] || { echo "::error::Build directory missing"; exit 1; }
+          [ -f "release/app/dist/renderer/index.html" ] || { echo "::error::index.html missing"; exit 1; }
+          echo "✅ Build verified ($(du -sh release/app/dist/renderer | cut -f1))"
 
       - name: Delete source maps
-        run: find ./release/app/dist/renderer -type f -name "*.map" -delete 2>/dev/null || true
+        run: find ./release/app/dist/renderer -name "*.map" -delete 2>/dev/null || true
 
       - name: Sync Capacitor assets
         run: npx cap sync android
 
-      - name: Verify Capacitor sync completed
+      - name: Verify Capacitor sync
         run: |
-          ASSETS_BASE="android/app/src/main/assets"
-          
-          if [ -d "$ASSETS_BASE/public" ]; then
-            ANDROID_ASSETS="$ASSETS_BASE/public"
-          elif [ -d "$ASSETS_BASE/www" ]; then
-            ANDROID_ASSETS="$ASSETS_BASE/www"
+          ASSETS="android/app/src/main/assets"
+          if [ -d "$ASSETS/public" ]; then
+            DIR="$ASSETS/public"
+          elif [ -d "$ASSETS/www" ]; then
+            DIR="$ASSETS/www"
           else
-            echo "::error::Android assets directory not found!"
-            echo "Searched in: $ASSETS_BASE/public and $ASSETS_BASE/www"
-            echo "Available directories:"
-            ls -la "$ASSETS_BASE/" || true
+            echo "::error::Assets directory not found"
             exit 1
           fi
           
-          if [ ! -f "$ANDROID_ASSETS/index.html" ]; then
-            echo "::error::index.html not found in Android assets!"
-            echo "Contents of $ANDROID_ASSETS:"
-            ls -la "$ANDROID_ASSETS/" || true
-            exit 1
-          fi
-          
-          echo "✅ Capacitor sync verified"
-          echo "Assets location: $ANDROID_ASSETS"
-          echo "Assets size: $(du -sh "$ANDROID_ASSETS" | cut -f1)"
+          [ -f "$DIR/index.html" ] || { echo "::error::index.html not synced"; exit 1; }
+          echo "✅ Sync verified ($(du -sh "$DIR" | cut -f1))"
 
-      - name: Debug - Check synced assets
+      - name: Complete Android diagnostics
+        shell: bash
         run: |
-          echo "=== Capacitor config ==="
-          cat capacitor.config.ts
+          set +e
+          echo "======================================"
+          echo "=== COMPLETE ANDROID DIAGNOSTICS ==="
+          echo "======================================"
+          
           echo ""
-          echo "=== Android assets directory content ==="
-          ls -lh android/app/src/main/assets/public/ | head -30
+          echo "=== 1. Capacitor Configs ==="
+          echo "--- TypeScript Config ---"
+          cat capacitor.config.ts || true
           echo ""
-          echo "=== Check for index.html ==="
+          echo "--- Runtime JSON Config ---"
+          cat android/app/src/main/assets/capacitor.config.json 2>/dev/null || echo "❌ Not found"
+          
+          echo ""
+          echo "=== 2. Complete Android Structure ==="
+          if command -v tree >/dev/null 2>&1; then
+            tree -L 4 android/app/src/ 2>/dev/null || true
+          else
+            echo "Directory structure:"
+            find android/app/src -type d 2>/dev/null | sort || true
+          fi
+          
+          echo ""
+          echo "=== 3. MainActivity Search ==="
+          echo "Searching for MainActivity files:"
+          find android -type f \( -name "MainActivity.java" -o -name "MainActivity.kt" \) 2>/dev/null || echo "❌ No MainActivity found"
+          
+          MAIN_JAVA=$(find android/app/src/main -name "MainActivity.java" 2>/dev/null || true)
+          MAIN_KT=$(find android/app/src/main -name "MainActivity.kt" 2>/dev/null || true)
+          
+          if [ -n "$MAIN_JAVA" ]; then
+            echo "✅ Found Java: $MAIN_JAVA"
+          elif [ -n "$MAIN_KT" ]; then
+            echo "✅ Found Kotlin: $MAIN_KT"
+          else
+            echo "❌ MainActivity not found in standard location"
+          fi
+          
+          echo ""
+          echo "=== 4. COMPLETE MainActivity Content ==="
+          MAIN_FILE="${MAIN_JAVA:-$MAIN_KT}"
+          if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
+            echo "--- Full content of $MAIN_FILE ---"
+            cat "$MAIN_FILE" 2>/dev/null || echo "Cannot read file"
+          else
+            echo "❌ MainActivity file not accessible"
+          fi
+          
+          echo ""
+          echo "=== 5. COMPLETE AndroidManifest.xml ==="
+          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
+            echo "--- Full AndroidManifest.xml ---"
+            cat android/app/src/main/AndroidManifest.xml
+          else
+            echo "❌ AndroidManifest.xml not found"
+          fi
+          
+          echo ""
+          echo "=== 6. Complete Assets Directory Listing ==="
+          echo "Full directory tree:"
+          if command -v tree >/dev/null 2>&1; then
+            tree android/app/src/main/assets/public/ 2>/dev/null || true
+          else
+            find android/app/src/main/assets/public -type f 2>/dev/null | sort || echo "❌ Assets not found"
+          fi
+          
+          echo ""
+          echo "Detailed file listing:"
+          ls -lhR android/app/src/main/assets/public/ 2>/dev/null || echo "❌ Cannot list"
+          
+          echo ""
+          echo "=== 7. JavaScript Files Analysis ==="
+          JS_COUNT=$(find android/app/src/main/assets/public -name "*.js" 2>/dev/null | wc -l || echo "0")
+          echo "Total JS files: $JS_COUNT"
+          if [ "$JS_COUNT" -gt 0 ]; then
+            echo "All JavaScript files:"
+            find android/app/src/main/assets/public -name "*.js" -ls 2>/dev/null || true
+          else
+            echo "⚠️ No JavaScript files found!"
+          fi
+          
+          echo ""
+          echo "=== 8. COMPLETE index.html Content ==="
           if [ -f "android/app/src/main/assets/public/index.html" ]; then
-            echo "✅ index.html exists"
-            echo "Size: $(ls -lh android/app/src/main/assets/public/index.html | awk '{print $5}')"
+            echo "--- Full index.html ---"
+            cat android/app/src/main/assets/public/index.html
           else
-            echo "❌ index.html NOT found!"
+            echo "❌ index.html not found"
           fi
+          
           echo ""
-          echo "=== Check assets subdirectories ==="
-          du -sh android/app/src/main/assets/public/* 2>/dev/null || true
+          echo "=== 9. App Icons Complete Check ==="
+          echo "Checking all mipmap directories:"
+          ls -lhR android/app/src/main/res/mipmap-* 2>/dev/null || echo "⚠️ No custom icons"
+          
           echo ""
-          echo "=== Original build output size breakdown ==="
-          du -sh release/app/dist/renderer/* 2>/dev/null | sort -rh | head -20
+          echo "=== 10. COMPLETE build.gradle ==="
+          if [ -f "android/app/build.gradle" ]; then
+            echo "--- Full build.gradle ---"
+            cat android/app/build.gradle
+          else
+            echo "❌ build.gradle not found"
+          fi
+          
           echo ""
-          echo "=== CRITICAL: Check for JavaScript files ==="
-          find android/app/src/main/assets/public/assets -name "*.js" | head -20
+          echo "=== 11. Package Name Verification ==="
+          echo "From capacitor.config.ts:"
+          grep "appId" capacitor.config.ts || true
           echo ""
-          echo "=== Directory structure of assets ==="
-          ls -R android/app/src/main/assets/public/assets/ | head -50
-
-      - name: Prepare release keystore
-        run: |
+          echo "From AndroidManifest.xml:"
+          grep "package=" android/app/src/main/AndroidManifest.xml 2>/dev/null || true
+          echo ""
+          echo "From build.gradle:"
+          grep "applicationId" android/app/build.gradle 2>/dev/null || true
+          
+          echo ""
+          echo "=== 12. Resource Files Check ==="
+          echo "CSS files:"
+          find android/app/src/main/assets/public -name "*.css" -ls 2>/dev/null || true
+          echo ""
+          echo "Font files:"
+          find android/app/src/main/assets/public -name "*.ttf" 2>/dev/null || true
+          find android/app/src/main/assets/public -name "*.woff*" 2>/dev/null || true
+          echo ""
+          echo "Image files:"
+          find android/app/src/main/assets/public -name "*.png" 2>/dev/null || true
+          find android/app/src/main/assets/public -name "*.jpg" 2>/dev/null || true
+          find android/app/src/main/assets/public -name "*.svg" 2>/dev/null || true
+          find android/app/src/main/assets/public -name "*.ico" 2>/dev/null || true
+          
+          echo ""
+          echo "======================================"
           set -e
+
+      - name: Prepare release keystore with caching
+        run: |
+          mkdir -p .github/cache
+          
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
-            echo "Using secrets for release signing."
+            echo "Using Secrets keystore (official release)"
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
-            cat > android/key.properties << EOF
+            cat > android/key.properties << 'KEYEOF'
           storeFile=upload-keystore.jks
           storePassword=${{ secrets.KEYSTORE_PASSWORD }}
           keyAlias=${{ secrets.KEY_ALIAS }}
           keyPassword=${{ secrets.KEY_PASSWORD }}
-          EOF
+          KEYEOF
+            echo "✅ Release keystore configured"
           else
-            echo "Generating temporary keystore."
-            keytool -genkey -v -keystore android/app/upload-keystore.jks \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass android -keypass android \
-              -alias androiddebugkey \
-              -dname "CN=Android Debug, O=Android, C=US"
-            cat > android/key.properties << EOF
+            if [ -f ".github/cache/upload-keystore.jks" ]; then
+              echo "✅ Reusing cached auto-generated keystore (supports upgrade)"
+              cp .github/cache/upload-keystore.jks android/app/upload-keystore.jks
+            else
+              echo "🔑 Generating new auto-keystore (first build)"
+              keytool -genkey -v -keystore android/app/upload-keystore.jks \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass android -keypass android -alias androiddebugkey \
+                -dname "CN=Chatbox Auto Build,O=Chatbox,C=CN"
+              cp android/app/upload-keystore.jks .github/cache/upload-keystore.jks
+              echo "💾 Cached keystore for future builds"
+            fi
+            
+            cat > android/key.properties << 'KEYEOF'
           storeFile=upload-keystore.jks
           storePassword=android
           keyAlias=androiddebugkey
           keyPassword=android
-          EOF
+          KEYEOF
+            echo "✅ Auto keystore configured (upgradeable)"
           fi
-
-      - name: Configure build.gradle for arm64 and signing
-        run: |
-          BUILD_GRADLE="android/app/build.gradle"
           
-          cat > "${BUILD_GRADLE}.tmp" << 'HEADER_EOF'
-          def keystorePropertiesFile = rootProject.file('key.properties')
-          def keystoreProperties = new Properties()
-          if (keystorePropertiesFile.exists()) {
-              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          echo ""
+          echo "Keystore info:"
+          keytool -list -v -keystore android/app/upload-keystore.jks -storepass android 2>/dev/null || \
+          keytool -list -v -keystore android/app/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" 2>/dev/null || \
+          echo "⚠️ Cannot display keystore info"
+
+      - name: Configure build for arm64 and signing
+        run: |
+          rm -f android/app/arm64-config.gradle || true
+          
+          cat > android/app/arm64-config.gradle << 'GRADLEEOF'
+          def keystoreFile = rootProject.file('key.properties')
+          def keystoreProps = new Properties()
+          def hasKeystore = keystoreFile.exists()
+          if (hasKeystore) {
+              keystoreProps.load(new FileInputStream(keystoreFile))
           }
           
-          HEADER_EOF
-          cat "$BUILD_GRADLE" >> "${BUILD_GRADLE}.tmp"
-          mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
-          
-          sed -i '/^android {/a\
-              splits {\
-                  abi {\
-                      enable false\
-                  }\
-                  density {\
-                      enable false\
-                  }\
-              }' "$BUILD_GRADLE"
-          
-          sed -i '/defaultConfig {/a\
-              ndk {\
-                  abiFilters "arm64-v8a"\
-              }' "$BUILD_GRADLE"
-          
-          sed -i '/^android {/a\
-              if (keystorePropertiesFile.exists()) {\
-                  signingConfigs {\
-                      release {\
-                          storeFile file(keystoreProperties["storeFile"])\
-                          storePassword keystoreProperties["storePassword"]\
-                          keyAlias keystoreProperties["keyAlias"]\
-                          keyPassword keystoreProperties["keyPassword"]\
-                      }\
-                  }\
-              }' "$BUILD_GRADLE"
-          
-          sed -i '/buildTypes {/,/release {/{
-              /release {/a\
-                  if (keystorePropertiesFile.exists()) {\
-                      signingConfig signingConfigs.release\
+          android {
+              splits {
+                  abi {
+                      enable false
                   }
-          }' "$BUILD_GRADLE"
+                  density {
+                      enable false
+                  }
+              }
+              
+              defaultConfig {
+                  ndk {
+                      abiFilters "arm64-v8a"
+                  }
+              }
+              
+              if (hasKeystore) {
+                  signingConfigs {
+                      release {
+                          storeFile file(keystoreProps['storeFile'])
+                          storePassword keystoreProps['storePassword']
+                          keyAlias keystoreProps['keyAlias']
+                          keyPassword keystoreProps['keyPassword']
+                      }
+                  }
+                  
+                  buildTypes {
+                      release {
+                          signingConfig signingConfigs.release
+                      }
+                  }
+              }
+          }
+          GRADLEEOF
+          
+          if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle 2>/dev/null; then
+            echo "" >> android/app/build.gradle
+            echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
+          fi
+          
+          echo "✅ Build configuration applied"
 
-      - name: Build arm64-v8a APK
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew || true
+
+      - name: Build release APK
         run: |
           cd android
           ./gradlew assembleRelease --stacktrace --build-cache
           cd ..
-      
-      - name: Find and package APK
-        id: find_apk
+
+      - name: Package and rename APK
+        id: apk
         run: |
-          set -e
-          
-          STANDARD_APK="android/app/build/outputs/apk/release/app-release.apk"
-          
-          if [ -f "$STANDARD_APK" ]; then
-            APK_PATH="$STANDARD_APK"
-          else
-            APK_PATH=$(find android/app/build/outputs/apk/release -type f \
-              \( -name "app-release.apk" -o -name "*-release.apk" \) \
-              ! -name "*unsigned*" | head -n 1)
-            
-            if [ -z "$APK_PATH" ]; then
-              echo "::error::APK not found!"
-              find android/app/build/outputs -type f
-              exit 1
-            fi
+          APK="android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            APK=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*unsigned*" 2>/dev/null | head -1 || true)
           fi
           
-          echo "✅ Found APK: $APK_PATH"
-          ls -lh "$APK_PATH"
+          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
+            echo "::error::APK not found"
+            echo "Available files:"
+            find android/app/build/outputs -type f 2>/dev/null || true
+            exit 1
+          fi
           
-          VERSION=$(node -p "require('./package.json').version")
+          VER=$(node -p "require('./package.json').version")
+          PROD=$(node -p "require('./package.json').productName||'chatbox'")
+          NAME="${PROD}-android-${VER}-arm64-v8a.apk"
+          
           mkdir -p artifacts
-          PRODUCT_NAME=$(node -p "require('./package.json').productName || 'chatbox'")
-          NEW_NAME="${PRODUCT_NAME}-android-${VERSION}-arm64-v8a.apk"
-          cp "$APK_PATH" "artifacts/$NEW_NAME"
-          echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
-          echo "✅ APK packaged as: $NEW_NAME"
+          cp "$APK" "artifacts/$NAME"
+          
+          echo "apk_name=$NAME" >> $GITHUB_OUTPUT
+          echo "✅ Packaged: $NAME ($(ls -lh artifacts/$NAME | awk '{print $5}'))"
+          
+          echo ""
+          echo "APK Details:"
+          file "artifacts/$NAME" 2>/dev/null || true
+          if command -v aapt >/dev/null 2>&1; then
+            aapt dump badging "artifacts/$NAME" 2>/dev/null | grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:" || true
+          else
+            echo "⚠️ aapt not available, skipping detailed APK analysis"
+          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: chatbox-android-arm64-v8a
-          path: artifacts/${{ steps.find_apk.outputs.apk_name }}
+          path: artifacts/${{ steps.apk.outputs.apk_name }}
           if-no-files-found: error
