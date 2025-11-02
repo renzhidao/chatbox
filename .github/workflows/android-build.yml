@@ -51,8 +51,25 @@ jobs:
       - name: Apply dependency patches
         run: npx patch-package
 
+      - name: Install Sharp (for icon generation)
+        run: |
+          if npm install sharp --ignore-scripts=false; then
+            echo "✅ Sharp installed successfully"
+          else
+            echo "::warning::Sharp installation failed, default icons will be used"
+          fi
+
       - name: Add Android platform
         run: npx cap add android
+
+      - name: Generate mobile assets (icons and splash screens)
+        run: |
+          if npm run mobile:assets; then
+            echo "✅ Custom icons and splash screens generated"
+            ls -la android/app/src/main/res/mipmap-* 2>/dev/null || true
+          else
+            echo "::warning::Custom assets generation failed, using default Capacitor icons"
+          fi
       
       - name: Setup Java JDK 17 and Gradle Cache
         uses: actions/setup-java@v4
@@ -110,21 +127,60 @@ jobs:
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
           export CHATBOX_BUILD_PLATFORM=android
+          export NODE_ENV=production
+          export TS_NODE_TRANSPILE_ONLY=true
           npm run build:renderer
 
       - name: Verify build output exists
         run: |
-          if [ ! -d "release/app/dist/renderer" ]; then
-            echo "::error::Build output not found!"
+          WEB_DIR="release/app/dist/renderer"
+          
+          if [ ! -d "$WEB_DIR" ]; then
+            echo "::error::Web directory $WEB_DIR not found!"
             exit 1
           fi
-          ls -la release/app/dist/renderer/
+          
+          if [ ! -f "$WEB_DIR/index.html" ]; then
+            echo "::error::index.html not found in $WEB_DIR!"
+            exit 1
+          fi
+          
+          echo "✅ Build output verified: $WEB_DIR"
+          echo "Build size: $(du -sh "$WEB_DIR" | cut -f1)"
 
       - name: Delete source maps
         run: find ./release/app/dist/renderer -type f -name "*.map" -delete 2>/dev/null || true
 
       - name: Sync Capacitor assets
         run: npx cap sync android
+
+      - name: Verify Capacitor sync completed
+        run: |
+          # Capacitor 可能使用 public 或 www 作为资源目录
+          ASSETS_BASE="android/app/src/main/assets"
+          
+          if [ -d "$ASSETS_BASE/public" ]; then
+            ANDROID_ASSETS="$ASSETS_BASE/public"
+          elif [ -d "$ASSETS_BASE/www" ]; then
+            ANDROID_ASSETS="$ASSETS_BASE/www"
+          else
+            echo "::error::Android assets directory not found!"
+            echo "Searched in: $ASSETS_BASE/public and $ASSETS_BASE/www"
+            echo "Available directories:"
+            ls -la "$ASSETS_BASE/" || true
+            exit 1
+          fi
+          
+          if [ ! -f "$ANDROID_ASSETS/index.html" ]; then
+            echo "::error::index.html not found in Android assets!"
+            echo "Contents of $ANDROID_ASSETS:"
+            ls -la "$ANDROID_ASSETS/" || true
+            exit 1
+          fi
+          
+          echo "✅ Capacitor sync verified"
+          echo "Assets location: $ANDROID_ASSETS"
+          echo "Assets size: $(du -sh "$ANDROID_ASSETS" | cut -f1)"
 
       - name: Prepare release keystore
         run: |
@@ -157,7 +213,6 @@ jobs:
         run: |
           BUILD_GRADLE="android/app/build.gradle"
           
-          # 1. 在文件顶部添加读取 key.properties 的逻辑
           cat > "${BUILD_GRADLE}.tmp" << 'HEADER_EOF'
           def keystorePropertiesFile = rootProject.file('key.properties')
           def keystoreProperties = new Properties()
@@ -169,7 +224,6 @@ jobs:
           cat "$BUILD_GRADLE" >> "${BUILD_GRADLE}.tmp"
           mv "${BUILD_GRADLE}.tmp" "$BUILD_GRADLE"
           
-          # 2. 在 android { 后面立即插入 ndk 和 splits 配置（不使用 afterEvaluate）
           sed -i '/^android {/a\
               splits {\
                   abi {\
@@ -180,13 +234,11 @@ jobs:
                   }\
               }' "$BUILD_GRADLE"
           
-          # 3. 在 defaultConfig 中添加 ndk.abiFilters
           sed -i '/defaultConfig {/a\
               ndk {\
                   abiFilters "arm64-v8a"\
               }' "$BUILD_GRADLE"
           
-          # 4. 在 android { 后添加签名配置
           sed -i '/^android {/a\
               if (keystorePropertiesFile.exists()) {\
                   signingConfigs {\
@@ -199,15 +251,12 @@ jobs:
                   }\
               }' "$BUILD_GRADLE"
           
-          # 5. 修改 release buildType 使用签名
           sed -i '/buildTypes {/,/release {/{
               /release {/a\
                   if (keystorePropertiesFile.exists()) {\
                       signingConfig signingConfigs.release\
                   }
           }' "$BUILD_GRADLE"
-          
-          echo "build.gradle configured successfully"
 
       - name: Build arm64-v8a APK
         run: |
@@ -215,7 +264,7 @@ jobs:
           ./gradlew assembleRelease --stacktrace --build-cache
           cd ..
       
-      - name: Find and Rename APK
+      - name: Find and package APK
         id: find_apk
         run: |
           set -e
@@ -236,13 +285,16 @@ jobs:
             fi
           fi
           
-          echo "Found APK: $APK_PATH"
+          echo "✅ Found APK: $APK_PATH"
+          ls -lh "$APK_PATH"
+          
           VERSION=$(node -p "require('./package.json').version")
           mkdir -p artifacts
           PRODUCT_NAME=$(node -p "require('./package.json').productName || 'chatbox'")
           NEW_NAME="${PRODUCT_NAME}-android-${VERSION}-arm64-v8a.apk"
           cp "$APK_PATH" "artifacts/$NEW_NAME"
           echo "apk_name=$NEW_NAME" >> $GITHUB_OUTPUT
+          echo "✅ APK packaged as: $NEW_NAME"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
