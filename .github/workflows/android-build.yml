@@ -236,7 +236,7 @@ jobs:
             if grep -q "plausible.midway.run" "$INDEX_HTML"; then
               echo "::warning::Plausible Analytics still present"
             else
-              echo "  ✅ Plausible Analytics removed"
+              echo "  ✅ Plausible removed"
             fi
           else
             echo "::error::index.html not found!"
@@ -293,6 +293,44 @@ jobs:
             else
               echo "✅ Plausible removed from synced HTML"
             fi
+            
+            echo ""
+            echo "=== 2.1. CRITICAL: Synced index.html Content Analysis ==="
+            echo "File size: $(wc -c < "$SYNCED_HTML") bytes"
+            echo "File lines: $(wc -l < "$SYNCED_HTML")"
+            echo ""
+            echo "--- First 3000 chars of synced index.html ---"
+            head -c 3000 "$SYNCED_HTML"
+            echo ""
+            echo "--- END of first 3000 chars ---"
+            echo ""
+            echo "--- DOCTYPE and HTML tag ---"
+            head -c 200 "$SYNCED_HTML"
+            echo ""
+            echo ""
+            echo "--- All script src attributes ---"
+            grep -o 'src="[^"]*"' "$SYNCED_HTML" | grep -v '\.css' | head -30 || echo "No src attributes found"
+            echo ""
+            echo "--- Check for main JS file reference ---"
+            if grep -q 'src="[^"]*\.js"' "$SYNCED_HTML"; then
+              echo "✅ JS file references found:"
+              grep -o 'src="[^"]*\.js"' "$SYNCED_HTML" | head -10
+            else
+              echo "❌ CRITICAL: No JS file references found!"
+            fi
+            echo ""
+            echo "--- Check for base tag (affects resource paths) ---"
+            if grep -q '<base' "$SYNCED_HTML"; then
+              echo "⚠️ Base tag found:"
+              grep -o '<base[^>]*>' "$SYNCED_HTML"
+            else
+              echo "✅ No base tag (paths are relative)"
+            fi
+            echo ""
+            echo "--- Count of different resource types ---"
+            echo "Script tags: $(grep -o '<script' "$SYNCED_HTML" | wc -l)"
+            echo "Link tags: $(grep -o '<link' "$SYNCED_HTML" | wc -l)"
+            echo "Img tags: $(grep -o '<img' "$SYNCED_HTML" | wc -l)"
           fi
           
           echo ""
@@ -309,9 +347,19 @@ jobs:
           fi
           
           echo ""
-          echo "=== 4. JavaScript Files Count ==="
+          echo "=== 4. JavaScript Files Analysis ==="
           JS_COUNT=$(find android/app/src/main/assets/public -name "*.js" 2>/dev/null | wc -l || echo "0")
           echo "Total JS files: $JS_COUNT"
+          if [ "$JS_COUNT" -gt 0 ]; then
+            echo ""
+            echo "Sample JS files (first 10):"
+            find android/app/src/main/assets/public -name "*.js" 2>/dev/null | head -10 || true
+            echo ""
+            echo "Main JS file check:"
+            find android/app/src/main/assets/public -name "main*.js" 2>/dev/null || echo "No main*.js found"
+          else
+            echo "❌ CRITICAL: No JavaScript files found in assets!"
+          fi
           
           echo ""
           echo "=== 5. App Icons Check ==="
