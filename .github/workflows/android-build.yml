@@ -32,7 +32,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-node-modules-
 
-      - name: Create capacitor.config.ts with mobile optimizations
+      - name: Create capacitor.config.ts
         run: |
           cat > capacitor.config.ts << 'EOF'
           import { CapacitorConfig } from '@capacitor/cli';
@@ -56,7 +56,7 @@ jobs:
           
           export default config;
           EOF
-          echo "✅ Created capacitor.config.ts with correct mobile configuration"
+          echo "✅ Created capacitor.config.ts"
 
       - name: Install dependencies (without scripts)
         run: npm install --ignore-scripts
@@ -159,8 +159,89 @@ jobs:
           [ -f "release/app/dist/renderer/index.html" ] || { echo "::error::index.html missing"; exit 1; }
           echo "✅ Build verified ($(du -sh release/app/dist/renderer | cut -f1))"
 
-      - name: Delete source maps
-        run: find ./release/app/dist/renderer -name "*.map" -delete 2>/dev/null || true
+      - name: Remove external scripts and source maps for mobile
+        run: |
+          set -e
+          
+          # 移除 source maps
+          echo "Removing source maps..."
+          find ./release/app/dist/renderer -name "*.map" -delete 2>/dev/null || true
+          
+          # 使用 Python 精确移除外部脚本（支持压缩HTML）
+          INDEX_HTML="release/app/dist/renderer/index.html"
+          if [ -f "$INDEX_HTML" ]; then
+            echo "Processing index.html to remove external analytics scripts..."
+            
+            # 备份
+            cp "$INDEX_HTML" "${INDEX_HTML}.backup"
+            
+            python3 << 'PYTHON_EOF'
+          import re
+          import sys
+          
+          try:
+              html_file = 'release/app/dist/renderer/index.html'
+              
+              with open(html_file, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              
+              if not content:
+                  print("ERROR: index.html is empty", file=sys.stderr)
+                  sys.exit(1)
+              
+              original_size = len(content)
+              
+              # 定义要删除的脚本模式
+              patterns = [
+                  # Google Analytics 加载脚本
+                  r'<script async src="https://www\.googletagmanager\.com/gtag/js[^"]*"></script>',
+                  # Plausible 加载脚本
+                  r'<script\s+defer[^>]*plausible\.midway\.run[^>]*></script>',
+                  # Plausible 初始化脚本
+                  r'<script>window\.plausible\s*=[\s\S]*?</script>',
+                  # Google Analytics 初始化脚本
+                  r'<script>window\.dataLayer\s*=[\s\S]*?</script>',
+              ]
+              
+              # 依次删除所有匹配的脚本
+              for pattern in patterns:
+                  content = re.sub(pattern, '', content, flags=re.DOTALL)
+              
+              # 写回文件
+              with open(html_file, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              
+              removed_size = original_size - len(content)
+              print(f"✅ External scripts removed from index.html")
+              print(f"   Original size: {original_size} bytes")
+              print(f"   New size: {len(content)} bytes")
+              print(f"   Removed: {removed_size} bytes")
+              
+          except FileNotFoundError:
+              print(f"ERROR: {html_file} not found", file=sys.stderr)
+              sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: {e}", file=sys.stderr)
+              sys.exit(1)
+          PYTHON_EOF
+            
+            echo ""
+            echo "Verification:"
+            if grep -q "googletagmanager.com" "$INDEX_HTML"; then
+              echo "::warning::Google Analytics still present"
+            else
+              echo "  ✅ Google Analytics removed"
+            fi
+            
+            if grep -q "plausible.midway.run" "$INDEX_HTML"; then
+              echo "::warning::Plausible Analytics still present"
+            else
+              echo "  ✅ Plausible Analytics removed"
+            fi
+          else
+            echo "::error::index.html not found!"
+            exit 1
+          fi
 
       - name: Sync Capacitor assets
         run: npx cap sync android
@@ -197,19 +278,25 @@ jobs:
           cat android/app/src/main/assets/capacitor.config.json 2>/dev/null || echo "❌ Not found"
           
           echo ""
-          echo "=== 2. Complete Android Structure ==="
-          if command -v tree >/dev/null 2>&1; then
-            tree -L 4 android/app/src/ 2>/dev/null || true
-          else
-            echo "Directory structure:"
-            find android/app/src -type d 2>/dev/null | sort || true
+          echo "=== 2. Verify External Scripts Removal ==="
+          SYNCED_HTML="android/app/src/main/assets/public/index.html"
+          if [ -f "$SYNCED_HTML" ]; then
+            echo "Checking synced index.html for external scripts..."
+            if grep -q "googletagmanager.com" "$SYNCED_HTML"; then
+              echo "❌ CRITICAL: Google Analytics still in synced HTML!"
+            else
+              echo "✅ Google Analytics removed from synced HTML"
+            fi
+            
+            if grep -q "plausible.midway.run" "$SYNCED_HTML"; then
+              echo "❌ CRITICAL: Plausible still in synced HTML!"
+            else
+              echo "✅ Plausible removed from synced HTML"
+            fi
           fi
           
           echo ""
           echo "=== 3. MainActivity Search ==="
-          echo "Searching for MainActivity files:"
-          find android -type f \( -name "MainActivity.java" -o -name "MainActivity.kt" \) 2>/dev/null || echo "❌ No MainActivity found"
-          
           MAIN_JAVA=$(find android/app/src/main -name "MainActivity.java" 2>/dev/null || true)
           MAIN_KT=$(find android/app/src/main -name "MainActivity.kt" 2>/dev/null || true)
           
@@ -218,100 +305,17 @@ jobs:
           elif [ -n "$MAIN_KT" ]; then
             echo "✅ Found Kotlin: $MAIN_KT"
           else
-            echo "❌ MainActivity not found in standard location"
+            echo "❌ MainActivity not found"
           fi
           
           echo ""
-          echo "=== 4. COMPLETE MainActivity Content ==="
-          MAIN_FILE="${MAIN_JAVA:-$MAIN_KT}"
-          if [ -n "$MAIN_FILE" ] && [ -f "$MAIN_FILE" ]; then
-            echo "--- Full content of $MAIN_FILE ---"
-            cat "$MAIN_FILE" 2>/dev/null || echo "Cannot read file"
-          else
-            echo "❌ MainActivity file not accessible"
-          fi
-          
-          echo ""
-          echo "=== 5. COMPLETE AndroidManifest.xml ==="
-          if [ -f "android/app/src/main/AndroidManifest.xml" ]; then
-            echo "--- Full AndroidManifest.xml ---"
-            cat android/app/src/main/AndroidManifest.xml
-          else
-            echo "❌ AndroidManifest.xml not found"
-          fi
-          
-          echo ""
-          echo "=== 6. Complete Assets Directory Listing ==="
-          echo "Full directory tree:"
-          if command -v tree >/dev/null 2>&1; then
-            tree android/app/src/main/assets/public/ 2>/dev/null || true
-          else
-            find android/app/src/main/assets/public -type f 2>/dev/null | sort || echo "❌ Assets not found"
-          fi
-          
-          echo ""
-          echo "Detailed file listing:"
-          ls -lhR android/app/src/main/assets/public/ 2>/dev/null || echo "❌ Cannot list"
-          
-          echo ""
-          echo "=== 7. JavaScript Files Analysis ==="
+          echo "=== 4. JavaScript Files Count ==="
           JS_COUNT=$(find android/app/src/main/assets/public -name "*.js" 2>/dev/null | wc -l || echo "0")
           echo "Total JS files: $JS_COUNT"
-          if [ "$JS_COUNT" -gt 0 ]; then
-            echo "All JavaScript files:"
-            find android/app/src/main/assets/public -name "*.js" -ls 2>/dev/null || true
-          else
-            echo "⚠️ No JavaScript files found!"
-          fi
           
           echo ""
-          echo "=== 8. COMPLETE index.html Content ==="
-          if [ -f "android/app/src/main/assets/public/index.html" ]; then
-            echo "--- Full index.html ---"
-            cat android/app/src/main/assets/public/index.html
-          else
-            echo "❌ index.html not found"
-          fi
-          
-          echo ""
-          echo "=== 9. App Icons Complete Check ==="
-          echo "Checking all mipmap directories:"
-          ls -lhR android/app/src/main/res/mipmap-* 2>/dev/null || echo "⚠️ No custom icons"
-          
-          echo ""
-          echo "=== 10. COMPLETE build.gradle ==="
-          if [ -f "android/app/build.gradle" ]; then
-            echo "--- Full build.gradle ---"
-            cat android/app/build.gradle
-          else
-            echo "❌ build.gradle not found"
-          fi
-          
-          echo ""
-          echo "=== 11. Package Name Verification ==="
-          echo "From capacitor.config.ts:"
-          grep "appId" capacitor.config.ts || true
-          echo ""
-          echo "From AndroidManifest.xml:"
-          grep "package=" android/app/src/main/AndroidManifest.xml 2>/dev/null || true
-          echo ""
-          echo "From build.gradle:"
-          grep "applicationId" android/app/build.gradle 2>/dev/null || true
-          
-          echo ""
-          echo "=== 12. Resource Files Check ==="
-          echo "CSS files:"
-          find android/app/src/main/assets/public -name "*.css" -ls 2>/dev/null || true
-          echo ""
-          echo "Font files:"
-          find android/app/src/main/assets/public -name "*.ttf" 2>/dev/null || true
-          find android/app/src/main/assets/public -name "*.woff*" 2>/dev/null || true
-          echo ""
-          echo "Image files:"
-          find android/app/src/main/assets/public -name "*.png" 2>/dev/null || true
-          find android/app/src/main/assets/public -name "*.jpg" 2>/dev/null || true
-          find android/app/src/main/assets/public -name "*.svg" 2>/dev/null || true
-          find android/app/src/main/assets/public -name "*.ico" 2>/dev/null || true
+          echo "=== 5. App Icons Check ==="
+          ls android/app/src/main/res/mipmap-hdpi/ 2>/dev/null | head -5 || echo "⚠️ No custom icons"
           
           echo ""
           echo "======================================"
@@ -353,12 +357,6 @@ jobs:
           KEYEOF
             echo "✅ Auto keystore configured (upgradeable)"
           fi
-          
-          echo ""
-          echo "Keystore info:"
-          keytool -list -v -keystore android/app/upload-keystore.jks -storepass android 2>/dev/null || \
-          keytool -list -v -keystore android/app/upload-keystore.jks -storepass "${{ secrets.KEYSTORE_PASSWORD }}" 2>/dev/null || \
-          echo "⚠️ Cannot display keystore info"
 
       - name: Configure build for arm64 and signing
         run: |
@@ -447,15 +445,6 @@ jobs:
           
           echo "apk_name=$NAME" >> $GITHUB_OUTPUT
           echo "✅ Packaged: $NAME ($(ls -lh artifacts/$NAME | awk '{print $5}'))"
-          
-          echo ""
-          echo "APK Details:"
-          file "artifacts/$NAME" 2>/dev/null || true
-          if command -v aapt >/dev/null 2>&1; then
-            aapt dump badging "artifacts/$NAME" 2>/dev/null | grep -E "package:|sdkVersion:|targetSdkVersion:|native-code:" || true
-          else
-            echo "⚠️ aapt not available, skipping detailed APK analysis"
-          fi
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
