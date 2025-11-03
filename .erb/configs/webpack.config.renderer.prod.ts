@@ -22,7 +22,6 @@ checkNodeEnv('production')
 const inferredRelease = process.env.SENTRY_RELEASE || packageJson.version
 const inferredDist = process.env.SENTRY_DIST || undefined
 
-// Ensure downstream tooling sees consistent release/dist values
 process.env.SENTRY_RELEASE = inferredRelease
 if (inferredDist) {
   process.env.SENTRY_DIST = inferredDist
@@ -40,7 +39,7 @@ const configuration: webpack.Configuration = {
   output: {
     path: webpackPaths.distRendererPath,
     publicPath: process.env.CHATBOX_BUILD_PLATFORM === 'web' ? '/' : './',
-    filename: 'assets/js/[name].[contenthash].js', // JS文件放在assets/js目录下
+    filename: 'assets/js/[name].[contenthash].js',
     library: {
       type: 'umd',
     },
@@ -76,23 +75,20 @@ const configuration: webpack.Configuration = {
         exclude: /\.module\.s?(c|a)ss$/,
         sideEffects: true,
       },
-      // Fonts
       {
         test: /\.(woff|woff2|eot|ttf|otf)$/i,
         type: 'asset/resource',
         generator: {
-          filename: 'assets/fonts/[name].[hash][ext]', // 字体资源放在assets/fonts目录下
+          filename: 'assets/fonts/[name].[hash][ext]',
         },
       },
-      // Images
       {
         test: /\.(png|jpg|jpeg|gif)$/i,
         type: 'asset/resource',
         generator: {
-          filename: 'assets/images/[name].[hash][ext]', // 图片资源放在assets/images目录下
+          filename: 'assets/images/[name].[hash][ext]',
         },
       },
-      // SVG
       {
         test: /\.svg$/,
         use: [
@@ -120,15 +116,6 @@ const configuration: webpack.Configuration = {
   },
 
   plugins: [
-    /**
-     * Create global constants which can be configured at compile time.
-     *
-     * Useful for allowing different behaviour between development builds and
-     * release builds
-     *
-     * NODE_ENV should be production so that modules do not perform certain
-     * development checks
-     */
     new webpack.EnvironmentPlugin({
       NODE_ENV: 'production',
       DEBUG_PROD: false,
@@ -142,7 +129,7 @@ const configuration: webpack.Configuration = {
     }),
 
     new MiniCssExtractPlugin({
-      filename: '[name].[contenthash].css', // CSS文件放在assets/css目录下 - 又不放了，因为这样会导致非web端的字体文件引用路径出错
+      filename: '[name].[contenthash].css',
     }),
 
     new BundleAnalyzerPlugin({
@@ -168,26 +155,8 @@ const configuration: webpack.Configuration = {
 
     new webpack.DefinePlugin({
       'process.type': '"renderer"',
+      'typescript': 'undefined',
     }),
-    // 禁用混淆，加快构建速度
-    // new JavaScriptObfuscator({
-    //   optionsPreset: 'default',
-    //   // 太卡了
-    //   // controlFlowFlattening: true,
-    //   // controlFlowFlatteningThreshold: 0.1,
-
-    //   // 默认的变量名混淆，可能被误报为恶意代码
-    //   identifierNamesGenerator: 'mangled-shuffled',
-    //   // 这些静态字符串混淆后，很可能被误报为恶意代码
-    //   exclude: ['initial_data.ts', 'initial_data.js'],
-
-    //   numbersToExpressions: true,
-    //   // 保护前端代码不被偷到其他地方部署
-    //   // 迁移过程中，暂时关闭保护
-    //   // domainLock: ['localhost', ".chatboxai.app", ".chatboxai.com", ".chatboxapp.xyz", "chatbox-pro.pages.dev"],
-    //   // domainLockRedirectUrl: 'https://chatboxai.app',
-    //   sourceMap: true,
-    // }),
     
     process.env.SENTRY_AUTH_TOKEN && sentryWebpackPlugin({
         authToken: process.env.SENTRY_AUTH_TOKEN,
