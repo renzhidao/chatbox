@@ -1,4 +1,3 @@
-
 import { Button, Flex, Image, Indicator, ScrollArea, Stack, Text } from '@mantine/core'
 import { IconChevronRight, IconFileImport, IconPlus } from '@tabler/icons-react'
 import { Link, useRouterState } from '@tanstack/react-router'
@@ -12,40 +11,33 @@ import { useProviders } from '@/hooks/useProviders'
 import { useIsSmallScreen } from '@/hooks/useScreenChange'
 import platform from '@/platform'
 
-import azureIcon from '../../static/icons/providers/azure.png'
-import chatboxAIIcon from '../../static/icons/providers/chatbox-ai.png'
-import chatglmIcon from '../../static/icons/providers/chatglm-6b.png'
-import claudeIcon from '../../static/icons/providers/claude.png'
-import deepseekIcon from '../../static/icons/providers/deepseek.png'
-import geminiIcon from '../../static/icons/providers/gemini.png'
-import groqIcon from '../../static/icons/providers/groq.png'
-import lmstudioIcon from '../../static/icons/providers/lm-studio.png'
-import mistralIcon from '../../static/icons/providers/mistral-ai.png'
-import ollamaIcon from '../../static/icons/providers/ollama.png'
-import openaiIcon from '../../static/icons/providers/openai.png'
-import openrouterIcon from '../../static/icons/providers/openrouter.png'
-import perplexityIcon from '../../static/icons/providers/perplexity.png'
-import siliconflowIcon from '../../static/icons/providers/siliconflow.png'
-import volcengineIcon from '../../static/icons/providers/volcengine.png'
-import xaiIcon from '../../static/icons/providers/xAI.png'
+// 移动端兼容：使用动态 require 替代静态 import
+const loadIcon = (name: string): string => {
+  try {
+    return require(`../../static/icons/providers/${name}.png`)
+  } catch (e) {
+    console.warn(`Provider icon not found: ${name}`)
+    return ''
+  }
+}
 
 const icons: Record<string, string> = {
-  azure: azureIcon,
-  'chatbox-ai': chatboxAIIcon,
-  'chatglm-6b': chatglmIcon,
-  claude: claudeIcon,
-  deepseek: deepseekIcon,
-  gemini: geminiIcon,
-  groq: groqIcon,
-  'lm-studio': lmstudioIcon,
-  'mistral-ai': mistralIcon,
-  ollama: ollamaIcon,
-  openai: openaiIcon,
-  openrouter: openrouterIcon,
-  perplexity: perplexityIcon,
-  siliconflow: siliconflowIcon,
-  volcengine: volcengineIcon,
-  xai: xaiIcon,
+  azure: loadIcon('azure'),
+  'chatbox-ai': loadIcon('chatbox-ai'),
+  'chatglm-6b': loadIcon('chatglm-6b'),
+  claude: loadIcon('claude'),
+  deepseek: loadIcon('deepseek'),
+  gemini: loadIcon('gemini'),
+  groq: loadIcon('groq'),
+  'lm-studio': loadIcon('lm-studio'),
+  'mistral-ai': loadIcon('mistral-ai'),
+  ollama: loadIcon('ollama'),
+  openai: loadIcon('openai'),
+  openrouter: loadIcon('openrouter'),
+  perplexity: loadIcon('perplexity'),
+  siliconflow: loadIcon('siliconflow'),
+  volcengine: loadIcon('volcengine'),
+  xai: loadIcon('xAI'),
 }
 
 interface ProviderListProps {
