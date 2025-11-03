@@ -174,6 +174,12 @@ export const SystemProviders: ProviderBaseInfo[] = [
           maxOutput: 100_000,
         },
         {
+          modelId: 'dall-e-3',
+        },
+        {
+          modelId: 'dall-e-2',
+        },
+        {
           modelId: 'text-embedding-3-small',
           type: 'embedding',
         },

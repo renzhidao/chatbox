@@ -702,7 +702,6 @@ function PictureConfig({
           }}
           selectedProviderId={sessionSettings.provider}
           selectedModelId={sessionSettings.modelId}
-          modelFilter={(model) => !model.type || (model.type !== 'chat' && model.type !== 'embedding' && model.type !== 'rerank')}
         >
           <Button variant="light" fullWidth>
             {modelSelectorDisplayText}
