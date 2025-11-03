@@ -1,3 +1,4 @@
+
 name: Build Chatbox Android APK (arm64-v8a)
 
 on:
@@ -377,6 +378,56 @@ jobs:
 
       - name: Sync Capacitor assets
         run: npx cap sync android
+
+      - name: Fix AndroidManifest.xml and add network security config
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          
+          # 备份原文件
+          cp "$MANIFEST" "${MANIFEST}.backup"
+          
+          # 1. 添加 usesCleartextTraffic 属性
+          if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then
+            sed -i '/<application/a\        android:usesCleartextTraffic="true"' "$MANIFEST"
+            echo "✅ Added usesCleartextTraffic=true"
+          fi
+          
+          # 2. 添加 networkSecurityConfig 属性
+          if ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
+            sed -i '/<application/a\        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
+            echo "✅ Added networkSecurityConfig"
+          fi
+          
+          # 3. 添加剪贴板读取权限
+          if ! grep -q 'android.permission.READ_CLIPBOARD' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_CLIPBOARD" />' "$MANIFEST"
+            echo "✅ Added READ_CLIPBOARD permission"
+          fi
+          
+          # 4. 创建网络安全配置文件
+          NSC_DIR="android/app/src/main/res/xml"
+          NSC_FILE="$NSC_DIR/network_security_config.xml"
+          
+          mkdir -p "$NSC_DIR"
+          
+          cat > "$NSC_FILE" << 'XML_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+              <domain-config cleartextTrafficPermitted="true">
+                  <domain includeSubdomains="true">127.0.0.1</domain>
+                  <domain includeSubdomains="true">localhost</domain>
+                  <domain includeSubdomains="true">10.0.2.2</domain>
+              </domain-config>
+          </network-security-config>
+          XML_EOF
+          
+          echo "✅ Created network_security_config.xml"
+          echo ""
+          echo "=== AndroidManifest.xml application tag ==="
+          grep -A5 '<application' "$MANIFEST" | head -8
+          echo ""
+          echo "=== network_security_config.xml ==="
+          cat "$NSC_FILE"
 
       - name: Verify Capacitor sync
         run: |
