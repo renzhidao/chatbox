@@ -11,7 +11,6 @@ import { createModelDependencies } from '@/adapters'
 import BaseConfig from './base-config'
 import type { ModelSettingUtil } from './interface'
 
-// TODO: 重新实现
 export default class CustomModelSettingUtil extends BaseConfig implements ModelSettingUtil {
   public provider: ModelProvider = ModelProviderEnum.Custom
   async getCurrentModelDisplayName(
@@ -21,6 +20,9 @@ export default class CustomModelSettingUtil extends BaseConfig implements ModelS
     providerBaseInfo?: ProviderBaseInfo
   ): Promise<string> {
     const providerName = providerBaseInfo?.name ?? 'Custom API'
+    if (sessionType === 'picture') {
+      return `${providerName} (${model} Image Generator)`
+    }
     return `${providerName} (${providerSettings?.models?.find((m) => m.modelId === model)?.nickname || model})`
   }
 

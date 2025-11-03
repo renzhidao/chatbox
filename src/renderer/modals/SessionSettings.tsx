@@ -21,9 +21,11 @@ import ImageCountSlider from '@/components/ImageCountSlider'
 import ImageStyleSelect from '@/components/ImageStyleSelect'
 import LazyNumberInput from '@/components/LazyNumberInput'
 import MaxContextMessageCountSlider from '@/components/MaxContextMessageCountSlider'
+import ModelSelector from '@/components/ModelSelector'
 import { ScalableIcon } from '@/components/ScalableIcon'
 import SegmentedControl from '@/components/SegmentedControl'
 import SliderWithInput from '@/components/SliderWithInput'
+import { useProviders } from '@/hooks/useProviders'
 import { useIsSmallScreen } from '@/hooks/useScreenChange'
 import { trackingEvent } from '@/packages/event'
 import { StorageKeyGenerator } from '@/storage/StoreStorage'
@@ -125,7 +127,6 @@ const SessionSettingsModal = NiceModal.create(
         applySessionChanges(editingData)
       }
 
-      // setChatConfigDialogSessionId(null)
       modal.resolve(editingData)
       modal.hide()
     }
@@ -222,7 +223,6 @@ const SessionSettingsModal = NiceModal.create(
               )}
             </AccordionSummary>
             <AccordionDetails>
-              {/* <Text>{JSON.stringify(editingData.settings)}</Text> */}
               {isChatSession(session) && (
                 <ChatConfig
                   settings={editingData.settings}
@@ -243,7 +243,26 @@ const SessionSettingsModal = NiceModal.create(
                   }
                 />
               )}
-              {isPictureSession(session) && <PictureConfig dataEdit={editingData} setDataEdit={setEditingData} />}
+              {isPictureSession(session) && (
+                <PictureConfig
+                  settings={editingData.settings}
+                  onSettingsChange={(d) =>
+                    setEditingData((_data) => {
+                      if (_data) {
+                        return {
+                          ..._data,
+                          settings: {
+                            ..._data?.settings,
+                            ...d,
+                          },
+                        }
+                      } else {
+                        return null
+                      }
+                    })
+                  }
+                />
+              )}
             </AccordionDetails>
           </Accordion>
         </DialogContent>
@@ -277,7 +296,6 @@ function ThinkingBudgetConfig({
 }: ThinkingBudgetConfigProps) {
   const { t } = useTranslation()
 
-  // Define preset values in one place
   const PRESET_VALUES = useMemo(() => [2048, 5120, 10240], [])
 
   const thinkingBudgetOptions = useMemo(
@@ -291,21 +309,16 @@ function ThinkingBudgetConfig({
     [t, PRESET_VALUES]
   )
 
-  // Add state to track custom mode selection
   const [isCustomMode, setIsCustomMode] = useState(false)
   const [userSelectedCustom, setUserSelectedCustom] = useState(false)
 
-  // Initialize custom mode based on current budget tokens
   useEffect(() => {
     if (isEnabled) {
       const matchesPreset = PRESET_VALUES.includes(currentBudgetTokens)
-      // Only auto-set custom mode if user hasn't manually selected custom and value doesn't match presets
       if (!matchesPreset && !isCustomMode && !userSelectedCustom) {
         setIsCustomMode(true)
       }
-      // Don't override user's manual custom selection even if value matches preset
     } else {
-      // Only reset if currently in custom mode
       if (isCustomMode || userSelectedCustom) {
         setIsCustomMode(false)
         setUserSelectedCustom(false)
@@ -313,7 +326,6 @@ function ThinkingBudgetConfig({
     }
   }, [isEnabled, currentBudgetTokens, PRESET_VALUES, isCustomMode, userSelectedCustom])
 
-  // Determine current segment value
   const getCurrentSegmentValue = useCallback(() => {
     if (!isEnabled) return 'disabled'
 
@@ -331,8 +343,7 @@ function ThinkingBudgetConfig({
         onConfigChange({ budgetTokens: 0, enabled: false })
       } else if (value === 'custom') {
         setIsCustomMode(true)
-        setUserSelectedCustom(true) // Mark that user manually selected custom
-        // For disabled to custom switch, use a reasonable default
+        setUserSelectedCustom(true)
         const customValue = currentBudgetTokens > 0 ? currentBudgetTokens : minValue || PRESET_VALUES[0]
         onConfigChange({ budgetTokens: customValue, enabled: true })
       } else {
@@ -436,7 +447,6 @@ function OpenAIProviderConfig({
   const { t } = useTranslation()
   const providerOptions = settings?.providerOptions?.openai
 
-  // Memoize options to prevent recreation on every render
   const reasoningEffortOptions = useMemo(
     () => [
       { label: t('Disabled'), value: 'null' },
@@ -459,7 +469,6 @@ function OpenAIProviderConfig({
     [onSettingsChange]
   )
 
-  // Simplify value calculation to avoid instability
   const currentValue = useMemo(() => {
     const effort = providerOptions?.reasoningEffort
     return effort === undefined ? 'null' : effort
@@ -655,29 +664,60 @@ export function ChatConfig({
   )
 }
 
-function PictureConfig(props: { dataEdit: Session; setDataEdit: (data: Session) => void }) {
-  const { dataEdit, setDataEdit } = props
+function PictureConfig({
+  settings,
+  onSettingsChange,
+}: {
+  settings: Session['settings']
+  onSettingsChange: (data: Session['settings']) => void
+}) {
+  const { t } = useTranslation()
+  const { providers } = useProviders()
   const globalSettings = settingsStore.getState().getSettings()
-  const sessionSettings = mergeSettings(globalSettings, dataEdit.settings || {}, dataEdit.type || 'chat')
-  const updateSettingsEdit = (updated: Partial<SessionSettings>) => {
-    setDataEdit({
-      ...dataEdit,
-      settings: {
-        ...(dataEdit.settings || {}),
-        ...updated,
-      },
-    })
-  }
+  const sessionSettings = mergeSettings(globalSettings, settings || {}, 'picture')
+
+  const modelSelectorDisplayText = useMemo(() => {
+    const provider = sessionSettings.provider
+    const modelId = sessionSettings.modelId
+    if (!provider || !modelId) {
+      return t('Select Model')
+    }
+    const providerInfo = providers.find((p) => p.id === provider)
+    const modelInfo = (providerInfo?.models || providerInfo?.defaultSettings?.models)?.find((m) => m.modelId === modelId)
+    return `${providerInfo?.name || provider} - ${modelInfo?.nickname || modelId}`
+  }, [providers, sessionSettings.provider, sessionSettings.modelId, t])
+
   return (
-    <Stack gap="md" className="mt-8">
+    <Stack gap="md">
+      <Stack gap="xs">
+        <Text size="sm" fw="600">
+          {t('Model')}
+        </Text>
+        <ModelSelector
+          onSelect={(provider, model) => {
+            onSettingsChange({
+              provider: provider as string,
+              modelId: model,
+            })
+          }}
+          selectedProviderId={sessionSettings.provider}
+          selectedModelId={sessionSettings.modelId}
+          modelFilter={(model) => !model.type || (model.type !== 'chat' && model.type !== 'embedding' && model.type !== 'rerank')}
+        >
+          <Button variant="light" fullWidth>
+            {modelSelectorDisplayText}
+          </Button>
+        </ModelSelector>
+      </Stack>
+
       <ImageStyleSelect
         value={sessionSettings.dalleStyle || pictureSessionSettings().dalleStyle!}
-        onChange={(v) => updateSettingsEdit({ dalleStyle: v })}
+        onChange={(v) => onSettingsChange({ dalleStyle: v })}
         className={sessionSettings.dalleStyle === undefined ? 'opacity-50' : ''}
       />
       <ImageCountSlider
         value={sessionSettings.imageGenerateNum || pictureSessionSettings().imageGenerateNum!}
-        onChange={(v) => updateSettingsEdit({ imageGenerateNum: v })}
+        onChange={(v) => onSettingsChange({ imageGenerateNum: v })}
         className={sessionSettings.imageGenerateNum === undefined ? 'opacity-50' : ''}
       />
     </Stack>
