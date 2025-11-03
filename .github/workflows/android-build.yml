@@ -80,7 +80,6 @@ jobs:
         run: |
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           
-          # 确保目录存在
           mkdir -p "$(dirname "$MAIN_JAVA")"
           
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
@@ -121,14 +120,12 @@ jobs:
               }
               
               private void checkAndRequestPermission() {
-                  // Android 13+ 不需要 WRITE_EXTERNAL_STORAGE 权限
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                       permissionGranted = true;
                       log("Android 13+: Storage permission not required");
                       return;
                   }
                   
-                  // Android 6.0 - 12 需要检查权限
                   if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
                           != PackageManager.PERMISSION_GRANTED) {
                       log("Storage permission not granted, requesting...");
@@ -156,7 +153,6 @@ jobs:
               
               @Override
               public void onCreate(Bundle savedInstanceState) {
-                  // 先请求权限
                   checkAndRequestPermission();
                   
                   log("=== MainActivity onCreate START ===");
@@ -167,15 +163,12 @@ jobs:
                       super.onCreate(savedInstanceState);
                       log("super.onCreate() completed");
                       
-                      // Enable WebView debugging and console logging
                       if (bridge != null && bridge.getWebView() != null) {
                           WebView webView = bridge.getWebView();
                           
-                          // Enable remote debugging
                           WebView.setWebContentsDebuggingEnabled(true);
                           log("WebView debugging enabled");
                           
-                          // Set console message handler
                           webView.setWebChromeClient(new WebChromeClient() {
                               @Override
                               public boolean onConsoleMessage(ConsoleMessage cm) {
@@ -186,7 +179,6 @@ jobs:
                           });
                           log("WebView console logging enabled");
                           
-                          // Log WebView URL
                           String url = webView.getUrl();
                           log("WebView URL: " + (url != null ? url : "null"));
                       } else {
@@ -202,17 +194,16 @@ jobs:
               }
               
               @Override
-              protected void onStart() {
+              public void onStart() {
                   log("=== onStart ===");
                   super.onStart();
               }
               
               @Override
-              protected void onResume() {
+              public void onResume() {
                   log("=== onResume ===");
                   super.onResume();
                   
-                  // Log WebView state after resume
                   if (bridge != null && bridge.getWebView() != null) {
                       String url = bridge.getWebView().getUrl();
                       log("WebView URL after resume: " + (url != null ? url : "null"));
@@ -220,13 +211,13 @@ jobs:
               }
               
               @Override
-              protected void onPause() {
+              public void onPause() {
                   log("=== onPause ===");
                   super.onPause();
               }
               
               @Override
-              protected void onDestroy() {
+              public void onDestroy() {
                   log("=== onDestroy ===");
                   super.onDestroy();
               }
@@ -235,7 +226,6 @@ jobs:
           
           echo "✅ MainActivity injected with debug logging and storage permission request"
           echo "   Log file will be: /sdcard/chatbox_debug.log"
-          echo "   App will request storage permission on first launch"
       
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
@@ -316,7 +306,6 @@ jobs:
         run: |
           set -e
           
-          # 移除 source maps
           echo "Removing source maps..."
           find ./release/app/dist/renderer -name "*.map" -delete 2>/dev/null || true
           
@@ -412,7 +401,6 @@ jobs:
           [ -f "$DIR/index.html" ] || { echo "::error::index.html not synced"; exit 1; }
           echo "✅ Sync verified ($(du -sh "$DIR" | cut -f1))"
           
-          # 最终验证：确保同步后的 HTML 也没有 %PUBLIC_URL%
           if grep -q "%PUBLIC_URL%" "$DIR/index.html"; then
             echo "::error::CRITICAL: %PUBLIC_URL% found in synced HTML!"
             exit 1
@@ -424,14 +412,12 @@ jobs:
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q "WRITE_EXTERNAL_STORAGE" "$MANIFEST"; then
-            # 在 </manifest> 之前插入权限声明
             sed -i '/<\/manifest>/i\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' "$MANIFEST"
             echo "✅ Added WRITE_EXTERNAL_STORAGE permission (maxSdkVersion=32)"
           else
             echo "✅ WRITE_EXTERNAL_STORAGE permission already exists"
           fi
           
-          # 验证权限已添加
           echo ""
           echo "Manifest permissions:"
           grep -A2 -B2 "uses-permission" "$MANIFEST" || echo "No permissions found"
@@ -452,6 +438,8 @@ jobs:
             echo "File size: $(wc -c < "$MAIN_JAVA") bytes"
             echo "Contains logging: $(grep -c 'log(' "$MAIN_JAVA" || echo 0) occurrences"
             echo "Permission request: $(grep -c 'REQUEST_WRITE_STORAGE' "$MAIN_JAVA" || echo 0) occurrences"
+            echo "Method signatures:"
+            grep -E "public void (onStart|onResume|onPause|onDestroy)" "$MAIN_JAVA" || echo "No lifecycle methods found"
           else
             echo "❌ MainActivity.java not found!"
           fi
