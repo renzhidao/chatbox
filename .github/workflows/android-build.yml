@@ -134,7 +134,6 @@ jobs:
                   log("Android Version: " + android.os.Build.VERSION.SDK_INT);
                   log("Package: xyz.chatboxapp.ce");
                   
-                  // 输出日志文件路径
                   File logDir = getExternalFilesDir(null);
                   if (logDir != null) {
                       log("Log file path: " + logDir.getAbsolutePath() + "/chatbox_debug.log");
@@ -152,11 +151,9 @@ jobs:
                               WebView webView = bridge.getWebView();
                               log("✅ WebView obtained");
                               
-                              // 启用 WebView 调试
                               WebView.setWebContentsDebuggingEnabled(true);
                               log("✅ WebView debugging enabled");
                               
-                              // 设置 WebChromeClient 捕获 console 输出
                               webView.setWebChromeClient(new WebChromeClient() {
                                   @Override
                                   public boolean onConsoleMessage(ConsoleMessage cm) {
@@ -285,6 +282,19 @@ jobs:
       - name: Accept SDK Licenses
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
+      - name: Patch webpack config for mobile build
+        run: |
+          WEBPACK_CONFIG=".erb/configs/webpack.config.renderer.prod.ts"
+          
+          cp "$WEBPACK_CONFIG" "${WEBPACK_CONFIG}.backup"
+          
+          sed -i "s/target: \['web', 'electron-renderer'\]/target: process.env.CHATBOX_BUILD_TARGET === 'mobile_app' ? ['web'] : ['web', 'electron-renderer']/" "$WEBPACK_CONFIG"
+          
+          echo "✅ Webpack config patched for mobile build"
+          echo ""
+          echo "Modified target line:"
+          grep "target:" "$WEBPACK_CONFIG" | head -1
+
       - name: Build web assets
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
@@ -342,7 +352,6 @@ jobs:
               for pattern in patterns:
                   content = re.sub(pattern, '', content, flags=re.DOTALL)
               
-              # 写回文件
               with open(html_file, 'w', encoding='utf-8') as f:
                   f.write(content)
               
@@ -477,32 +486,17 @@ jobs:
           
           VER=$(node -p "require('./package.json').version")
           PROD=$(node -p "require('./package.json').productName||'chatbox'")
-          NAME="${PROD}-android-${VER}-arm64-v8a-debug.apk"
+          NAME="${PROD}-android-${VER}-arm64-v8a.apk"
           
           mkdir -p artifacts
           cp "$APK" "artifacts/$NAME"
           
           echo "apk_name=$NAME" >> $GITHUB_OUTPUT
           echo "✅ $NAME ($(ls -lh artifacts/$NAME | awk '{print $5}'))"
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📱 DEBUG INSTRUCTIONS:"
-          echo ""
-          echo "1️⃣  Install APK and launch app"
-          echo ""
-          echo "2️⃣  Get System Log (recommended):"
-          echo "    logcat -d -s ChatboxDebug:* > /sdcard/log.txt"
-          echo "    cat /sdcard/log.txt"
-          echo ""
-          echo "3️⃣  Or get File Log:"
-          echo "    cat /sdcard/Android/data/xyz.chatboxapp.ce/files/chatbox_debug.log"
-          echo ""
-          echo "4️⃣  Send log content for analysis"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: chatbox-android-arm64-v8a-debug
+          name: chatbox-android-arm64-v8a
           path: artifacts/${{ steps.apk.outputs.apk_name }}
           if-no-files-found: error
