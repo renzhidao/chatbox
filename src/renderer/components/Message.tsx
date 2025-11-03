@@ -1,4 +1,3 @@
-typescript
 import NiceModal from '@ebay/nice-modal-react'
 import { ActionIcon, type ActionIconProps, Flex, Loader, Text, Tooltip as Tooltip1 } from '@mantine/core'
 import { Alert, Grid, Typography, useTheme } from '@mui/material'

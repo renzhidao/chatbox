@@ -1,0 +1,417 @@
+
+// ==UserScript==
+// @name         LMArena API Bridge (RealCapture HUD - nextjs-api fixed)
+// @namespace    http://tampermonkey.net/
+// @version      3.0.2
+// @description  真实捕获“重试”请求(域名/路径模板/方法/头)并原样回放；居中日志面板；拦截 fetch+XHR；支持 /nextjs-api 与 /api；避免404；无需后端改动。
+// @match        https://lmarena.ai/*
+// @match        https://*.lmarena.ai/*
+// @grant        none
+// @run-at       document-end
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const SERVER_WS = "ws://127.0.0.1:5102/ws";
+  const API_HOST_5102 = "http://127.0.0.1:5102";
+  const ID_SERVER_5103 = "http://127.0.0.1:5103/update";
+
+  const FORCE_ORIGIN = ""; // 可留空
+  const FORCE_METHOD = ""; // 可留空: "PUT"/"POST"
+  const STORE_KEY = "LMABridge_LastRetry_v3";
+
+  let socket;
+  let isCaptureModeActive = false;
+
+  let lastRetry = {
+    fullTemplate: "", // 绝对URL模板: https://host/xx/(nextjs-api|api)/stream/.../{SESSION_ID}/messages/{MESSAGE_ID}?q=...
+    method: "PUT",
+    headers: { accept: "text/event-stream, */*;q=0.5", contentType: "text/plain;charset=UTF-8" }
+  };
+
+  // 居中HUD
+  const HUD = (() => {
+    const box = document.createElement('div');
+    box.id = 'lmab_hud';
+    box.style.cssText = [
+      'position:fixed','left:50%','top:50%','transform:translate(-50%,-50%)',
+      'z-index:2147483647','width:min(92vw,900px)','max-height:80vh','overflow:auto',
+      'background:#0f1115','color:#eee','border:1px solid #2a2f3a','border-radius:12px',
+      'box-shadow:0 12px 40px rgba(0,0,0,.6)','padding:16px',
+      'font:14px/1.5 ui-monospace,Menlo,Consolas,monospace'
+    ].join(';');
+    box.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px;">
+        <div style="font-weight:600;color:#6cf;font-size:16px;">LMArena Bridge 日志</div>
+        <div>
+          <button id="lmab_min" style="padding:6px 10px;margin-right:6px;background:#333;color:#fff;border:0;border-radius:8px;">最小化</button>
+          <button id="lmab_close" style="padding:6px 10px;background:#c33;color:#fff;border:0;border-radius:8px;">关闭</button>
+        </div>
+      </div>
+      <div id="lmab_cap" style="word-break:break-all;margin-bottom:10px;background:#161a22;border:1px solid #2a2f3a;border-radius:8px;padding:8px;"></div>
+      <div id="lmab_try" style="white-space:pre-wrap;background:#161a22;border:1px solid #2a2f3a;border-radius:8px;padding:8px;max-height:60vh;overflow:auto;"></div>
+    `;
+    document.documentElement.appendChild(box);
+
+    const cap = box.querySelector('#lmab_cap');
+    const log = box.querySelector('#lmab_try');
+
+    box.querySelector('#lmab_close').onclick = () => { box.style.display = 'none'; };
+    box.querySelector('#lmab_min').onclick = () => {
+      box.style.top = 'auto'; box.style.bottom = '8px';
+      box.style.left = '8px'; box.style.transform = 'none';
+      box.style.width = 'min(92vw, 680px)';
+    };
+
+    const api = {
+      show: () => {
+        box.style.display = '';
+        box.style.left = '50%'; box.style.top = '50%';
+        box.style.bottom = ''; box.style.transform = 'translate(-50%, -50%)';
+        box.style.width = 'min(92vw, 900px)';
+      },
+      setCapture: (txt) => { cap.textContent = txt || ''; },
+      logTry: (txt) => {
+        const t = new Date().toLocaleTimeString();
+        log.textContent += `[${t}] ${txt}\n`;
+        log.scrollTop = log.scrollHeight;
+      },
+      loadFromStore() {
+        try {
+          const s = localStorage.getItem(STORE_KEY);
+          if (s) {
+            const obj = JSON.parse(s);
+            if (obj && obj.fullTemplate !== undefined) lastRetry = obj;
+            api.setCapture(`已记住模板: ${lastRetry.method} ${lastRetry.fullTemplate || '(空)'}`);
+          }
+        } catch {}
+      }
+    };
+    api.loadFromStore();
+    api.show(); api.logTry('HUD已就绪（发送/捕获时会显示详细日志）');
+    return api;
+  })();
+  window.HUD = HUD;
+
+  function makeUrlFromTemplate(template, session_id, message_id) {
+    const t = String(template || "").replace("{SESSION_ID}", session_id).replace("{MESSAGE_ID}", message_id);
+    if (/^https?:\/\//i.test(t)) return t;
+    return (location.origin.replace(/\/+$/,"") + "/" + t.replace(/^\/+/, ""));
+  }
+
+  function connect() {
+    const ws = new WebSocket(SERVER_WS);
+    socket = ws;
+
+    ws.onopen = () => {
+      if (!document.title.startsWith("✅ ")) document.title = "✅ " + document.title;
+    };
+
+    ws.onmessage = async (event) => {
+      let msg; try { msg = JSON.parse(event.data); } catch { return; }
+
+      if (msg && msg.command) {
+        if (msg.command === 'refresh' || msg.command === 'reconnect') {
+          location.reload();
+        } else if (msg.command === 'activate_id_capture') {
+          isCaptureModeActive = true;
+          if (!document.title.startsWith("🎯 ")) document.title = "🎯 " + document.title;
+          HUD.show(); HUD.logTry('捕获模式已开启：去聊天页点任意回复的“重试/Retry”。');
+        } else if (msg.command === 'send_page_source') {
+          sendPageSource();
+        }
+        return;
+      }
+
+      const { request_id, payload } = msg || {};
+      if (!request_id || !payload) return;
+      await executeFetchAndStreamBack(request_id, payload);
+    };
+
+    ws.onclose = () => {
+      if (document.title.startsWith("✅ ")) document.title = document.title.substring(2);
+      setTimeout(connect, 1500);
+    };
+
+    ws.onerror = () => { try { ws.close(); } catch {} };
+  }
+
+  function sendToServer(requestId, data) {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ request_id: requestId, data }));
+    }
+  }
+
+  async function executeFetchAndStreamBack(requestId, payload) {
+    const { is_image_request, message_templates, target_model_id, session_id, message_id } = (payload || {});
+    HUD.show();
+
+    if (!session_id || !message_id) {
+      sendToServer(requestId, { error: "会话ID为空；请在后端UI点“开始捕获”，回聊天页点一次“重试/Retry”" });
+      sendToServer(requestId, "[DONE]"); return;
+    }
+    if (!message_templates || !message_templates.length) {
+      sendToServer(requestId, { error: "message_templates 为空" });
+      sendToServer(requestId, "[DONE]"); return;
+    }
+
+    const msgs = [];
+    let lastId = null;
+    for (let i = 0; i < message_templates.length; i++) {
+      const t = message_templates[i];
+      const id = (crypto && crypto.randomUUID) ? crypto.randomUUID()
+                 : (Date.now() + '-' + Math.random().toString(16).slice(2));
+      const parents = lastId ? [lastId] : [];
+      const status = is_image_request ? 'success' : ((i === message_templates.length - 1) ? 'pending' : 'success');
+      msgs.push({
+        role: t.role, content: t.content, id,
+        evaluationId: null, evaluationSessionId: session_id, parentMessageIds: parents,
+        experimental_attachments: t.attachments || [],
+        failureReason: null, metadata: null,
+        participantPosition: t.participantPosition || "a",
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        status
+      });
+      lastId = id;
+    }
+    const body = { messages: msgs, modelId: target_model_id };
+
+    // 1) 按捕获模板直连（优先）
+    const baseTemplate = (lastRetry.fullTemplate || `/nextjs-api/stream/retry-evaluation-session-message/{SESSION_ID}/messages/{MESSAGE_ID}`);
+    const firstUrl = makeUrlFromTemplate(baseTemplate, session_id, message_id);
+    const firstMethod = (FORCE_METHOD || lastRetry.method || "PUT").toUpperCase();
+    const acceptH = (lastRetry.headers.accept || "text/event-stream, */*;q=0.5");
+    const ctypeH = (lastRetry.headers.contentType || "text/plain;charset=UTF-8");
+
+    HUD.setCapture(`模板: ${firstMethod} ${baseTemplate}`);
+    HUD.logTry(`尝试: ${firstMethod} ${firstUrl}`);
+
+    window.isApiBridgeRequest = true;
+    let response = null, ok = false, lastErr = '';
+    try {
+      response = await fetch(firstUrl, {
+        method: firstMethod,
+        headers: { 'Accept': acceptH, 'Content-Type': ctypeH },
+        body: JSON.stringify(body),
+        credentials: 'include'
+      });
+
+      if (response && response.ok && response.body) {
+        HUD.logTry(`成功: ${response.status}`);
+        ok = true;
+      } else {
+        let txt = ''; try { txt = (await response.text() || '').slice(0, 500); } catch {}
+        lastErr = `状态: ${response ? response.status : 'N/A'} 内容: ${txt || 'no body'}`;
+        HUD.logTry(`失败: ${lastErr}`);
+      }
+
+      // 2) 兜底：尝试 (nextjs-api | api) × (PUT | POST)
+      if (!ok) {
+        const bases = [
+          `/nextjs-api/stream/retry-evaluation-session-message/${session_id}/messages/${message_id}`,
+          `/api/stream/retry-evaluation-session-message/${session_id}/messages/${message_id}`
+        ];
+        const origins = Array.from(new Set([
+          (FORCE_ORIGIN || ""), new URL(firstUrl, location.origin).origin, location.origin, 'https://lmarena.ai'
+        ].filter(Boolean)));
+        const methods = Array.from(new Set([firstMethod, 'PUT', 'POST']));
+
+        outer:
+        for (const origin of origins) {
+          for (const b of bases) {
+            const u = origin.replace(/\/+$/,'') + b;
+            for (const m of methods) {
+              HUD.logTry(`兜底尝试: ${m} ${u}`);
+              try {
+                const r = await fetch(u, {
+                  method: m,
+                  headers: { 'Accept': acceptH, 'Content-Type': ctypeH },
+                  body: JSON.stringify(body),
+                  credentials: 'include'
+                });
+                if (r && r.ok && r.body) { response = r; ok = true; HUD.logTry(`成功: ${r.status}`); break outer; }
+                else {
+                  let t = ''; try { t = (await r.text() || '').slice(0, 500); } catch {}
+                  HUD.logTry(`失败: 状态 ${r ? r.status : 'N/A'} 内容: ${t || 'no body'}`);
+                }
+              } catch (e) { HUD.logTry(`失败: ${String(e).slice(0,200)}`); }
+            }
+          }
+        }
+      }
+
+      if (!ok) {
+        sendToServer(requestId, { error: `网络响应不正常。${lastErr || ''}` });
+        sendToServer(requestId, "[DONE]"); return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) { sendToServer(requestId, "[DONE]"); break; }
+        sendToServer(requestId, decoder.decode(value));
+      }
+
+    } catch (e) {
+      HUD.logTry(`异常: ${e.message || String(e)}`);
+      sendToServer(requestId, { error: e.message || String(e) });
+      sendToServer(requestId, "[DONE]");
+    } finally {
+      window.isApiBridgeRequest = false;
+    }
+  }
+
+  // UUID判定
+  function isUuid(s){ return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(s||''); }
+
+  // 从绝对URL生成模板（接受 /nextjs-api 或 /api）
+  function extractTemplateFromUrl(url) {
+    try {
+      const u = new URL(url, location.origin);
+      const path = u.pathname + (u.search || '');
+      const parts = (u.pathname || '').split('/').filter(Boolean);
+      const uuids = parts.filter(isUuid);
+      const okPrefix = (p) => (p.includes('/nextjs-api/') || p.includes('/api/'));
+      if (!okPrefix(u.pathname) || uuids.length < 1) return null;
+      let templ = path;
+      if (uuids[0]) templ = templ.replace(uuids[0], '{SESSION_ID}');
+      if (uuids[1]) templ = templ.replace(uuids[1], '{MESSAGE_ID}');
+      return (u.origin + templ);
+    } catch { return null; }
+  }
+
+  // fetch 拦截：打印全部外发；捕获 retry-evaluation 模板；必要时上报ID
+  const _fetch = window.fetch;
+  window.fetch = function(...args){
+    let urlString = '';
+    try {
+      const u0 = args[0];
+      if (u0 instanceof Request) urlString = u0.url;
+      else if (u0 instanceof URL) urlString = u0.href;
+      else if (typeof u0 === 'string') urlString = u0;
+    } catch { urlString = ''; }
+
+    try {
+      if (urlString) {
+        const init = args[1] || {};
+        const req = (args[0] instanceof Request) ? args[0] : null;
+        const method = (init.method || (req ? req.method : 'GET') || 'GET').toUpperCase();
+        HUD.logTry(`外发: ${method} ${urlString}`);
+      }
+    } catch {}
+
+    try {
+      if (urlString && !window.isApiBridgeRequest && urlString.includes('retry-evaluation-session-message')) {
+        const init = args[1] || {};
+        const req = (args[0] instanceof Request) ? args[0] : null;
+        const method = (init.method || (req ? req.method : 'GET') || 'GET').toUpperCase();
+        let templAbs = extractTemplateFromUrl(urlString);
+        if (templAbs) {
+          templAbs = FORCE_ORIGIN ? templAbs.replace(/^https?:\/\/[^/]+/, FORCE_ORIGIN) : templAbs;
+          let accept = "text/event-stream, */*;q=0.5";
+          let contentType = "text/plain;charset=UTF-8";
+          try {
+            const hdrs = init.headers || (req ? Object.fromEntries(req.headers.entries()) : null);
+            const getH = (k) => {
+              if (!hdrs) return "";
+              if (hdrs.get) return (hdrs.get(k) || "");
+              const l = Object.keys(hdrs).find(x => x.toLowerCase() === k.toLowerCase());
+              return l ? (hdrs[l] || "") : "";
+            };
+            accept = getH('Accept') || accept;
+            contentType = getH('Content-Type') || contentType;
+          } catch {}
+          lastRetry = {
+            fullTemplate: templAbs,
+            method: (FORCE_METHOD || method || "PUT").toUpperCase(),
+            headers: { accept, contentType }
+          };
+          try { localStorage.setItem(STORE_KEY, JSON.stringify(lastRetry)); } catch {}
+          HUD.show(); HUD.setCapture(`捕获模板: ${lastRetry.method} ${lastRetry.fullTemplate}`);
+          const uu = (String(urlString).match(/[0-9a-fA-F-]{36}/g) || []);
+          if (isCaptureModeActive && uu.length >= 2) {
+            isCaptureModeActive = false;
+            if (document.title.startsWith("🎯 ")) document.title = document.title.substring(2);
+            fetch(ID_SERVER_5103, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ sessionId: uu[0], messageId: uu[1] })
+            }).catch(()=>{});
+          }
+        }
+      }
+    } catch {}
+
+    return _fetch.apply(this, args);
+  };
+
+  // XHR 拦截：防页面用XHR不用fetch（同样支持 nextjs-api）
+  (function(){
+    const XHR = window.XMLHttpRequest;
+    if (!XHR) return;
+    const open = XHR.prototype.open;
+    const send = XHR.prototype.send;
+    const setHeader = XHR.prototype.setRequestHeader;
+
+    XHR.prototype.open = function(method, url){
+      this.__lmab = { method: (method||'GET').toUpperCase(), url: String(url||''), headers: {} };
+      try {
+        if (!window.isApiBridgeRequest && String(url).includes('retry-evaluation-session-message')) {
+          let templAbs = extractTemplateFromUrl(String(url));
+          if (templAbs) {
+            templAbs = FORCE_ORIGIN ? templAbs.replace(/^https?:\/\/[^/]+/, FORCE_ORIGIN) : templAbs;
+            lastRetry.fullTemplate = templAbs;
+            lastRetry.method = (FORCE_METHOD || this.__lmab.method || 'PUT').toUpperCase();
+            try { localStorage.setItem(STORE_KEY, JSON.stringify(lastRetry)); } catch {}
+            HUD.show(); HUD.setCapture(`捕获模板: ${lastRetry.method} ${lastRetry.fullTemplate}`);
+            const uu = (String(url).match(/[0-9a-fA-F-]{36}/g) || []);
+            if (isCaptureModeActive && uu.length >= 2) {
+              isCaptureModeActive = false;
+              if (document.title.startsWith("🎯 ")) document.title = document.title.substring(2);
+              fetch(ID_SERVER_5103, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sessionId: uu[0], messageId: uu[1] })
+              }).catch(()=>{});
+            }
+          }
+        }
+      } catch {}
+      return open.apply(this, arguments);
+    };
+
+    XHR.prototype.setRequestHeader = function(k,v){
+      try { if (this.__lmab) this.__lmab.headers[k.toLowerCase()] = v; } catch {}
+      return setHeader.apply(this, arguments);
+    };
+
+    XHR.prototype.send = function(body){
+      try {
+        if (this.__lmab) {
+          const h = this.__lmab.headers || {};
+          const accept = h['accept'] || lastRetry.headers.accept;
+          const contentType = h['content-type'] || lastRetry.headers.contentType;
+          lastRetry.headers = { accept, contentType };
+          try { localStorage.setItem(STORE_KEY, JSON.stringify(lastRetry)); } catch {}
+        }
+      } catch {}
+      return send.apply(this, arguments);
+    };
+  })();
+
+  async function sendPageSource() {
+    try {
+      const htmlContent = document.documentElement.outerHTML;
+      await fetch(`${API_HOST_5102}/internal/update_available_models`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/html' },
+        body: htmlContent
+      });
+      HUD.show(); HUD.logTry('页面源码已发送用于抓取模型列表。');
+    } catch {}
+  }
+
+  connect();
+})();

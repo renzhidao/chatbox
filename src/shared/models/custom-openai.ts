@@ -1,4 +1,3 @@
-typescript
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible'
 import { extractReasoningMiddleware, wrapLanguageModel } from 'ai'
 import type { ProviderModelInfo } from '../types'

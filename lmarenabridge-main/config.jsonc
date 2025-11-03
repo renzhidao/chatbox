@@ -1,0 +1,32 @@
+{
+  // 版本号（用于检查更新）
+  "version": "2.6.1",
+
+  // --- 会话设置 ---
+  "session_id": "019a4563-8f19-77d3-acf9-8367952da682",
+  "message_id": "019a4564-0334-78df-a170-d89f8a8e9c2e",
+
+  // --- ID 更新器专用配置 ---
+  "id_updater_last_mode": "direct_chat", // 或 "battle"
+  "id_updater_battle_target": "A",       // battle 时 A 或 B
+
+  // --- 功能开关 ---
+  "bypass_enabled": true,   // 绕过空白注入
+  "tavern_mode_enabled": false,
+
+  // --- 模型映射设置 ---
+  "use_default_ids_if_mapping_not_found": true, // 找不到映射时用上面的会话ID
+
+  // --- 行为设置 ---
+  "stream_response_timeout_seconds": 360,
+
+  // --- 自动重启设置 ---
+  "enable_idle_restart": true,
+  "idle_restart_timeout_seconds": -1,
+
+  // --- 安全设置 ---
+  "api_key": "",
+
+  // --- 更新设置（已关闭） ---
+  "enable_auto_update": false
+}
