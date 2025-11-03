@@ -291,30 +291,6 @@ jobs:
           echo "Modified target line:"
           grep "target:" "$WEBPACK_CONFIG" | head -1
 
-      - name: Prepare build directories and copy static assets
-        run: |
-          echo "Creating build directories..."
-          mkdir -p release/app/dist/renderer/static/icons/providers
-          mkdir -p release/app/dist/renderer/static/icons
-          mkdir -p release/app/dist/renderer/static/fonts
-          mkdir -p release/app/dist/renderer/static/logos
-          
-          echo "Copying static assets..."
-          if [ -d "src/renderer/static" ]; then
-            # 复制所有静态资源
-            cp -r src/renderer/static/* release/app/dist/renderer/static/ 2>/dev/null || true
-            
-            echo "✅ Static assets copied"
-            echo ""
-            echo "Provider icons:"
-            ls -la release/app/dist/renderer/static/icons/providers/ 2>/dev/null || echo "No provider icons found"
-            echo ""
-            echo "Static structure:"
-            find release/app/dist/renderer/static -type f | head -20
-          else
-            echo "::warning::Static directory not found at src/renderer/static"
-          fi
-
       - name: Build web assets
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
@@ -323,22 +299,11 @@ jobs:
           export TS_NODE_TRANSPILE_ONLY=true
           npm run build:renderer
 
-      - name: Verify build output and copy missing static assets
+      - name: Verify build output
         run: |
           [ -d "release/app/dist/renderer" ] || { echo "::error::Build directory missing"; exit 1; }
           [ -f "release/app/dist/renderer/index.html" ] || { echo "::error::index.html missing"; exit 1; }
-          
-          # 确保静态资源在构建后仍然存在
-          if [ -d "src/renderer/static" ] && [ ! -d "release/app/dist/renderer/static/icons/providers" ]; then
-            echo "Re-copying static assets after build..."
-            mkdir -p release/app/dist/renderer/static
-            cp -r src/renderer/static/* release/app/dist/renderer/static/
-          fi
-          
           echo "✅ Build verified ($(du -sh release/app/dist/renderer | cut -f1))"
-          echo ""
-          echo "Final provider icons check:"
-          ls -la release/app/dist/renderer/static/icons/providers/ 2>/dev/null || echo "::warning::No provider icons in final build"
 
       - name: Fix HTML for mobile (remove scripts & fix placeholders)
         run: |
