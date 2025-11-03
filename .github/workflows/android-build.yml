@@ -76,7 +76,7 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Inject debug logging to MainActivity with storage permission
+      - name: Inject comprehensive debug logging to MainActivity
         run: |
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           
@@ -85,16 +85,13 @@ jobs:
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
           
-          import android.Manifest;
-          import android.content.pm.PackageManager;
-          import android.os.Build;
           import android.os.Bundle;
+          import android.util.Log;
           import android.webkit.ConsoleMessage;
           import android.webkit.WebChromeClient;
           import android.webkit.WebView;
-          import androidx.core.app.ActivityCompat;
-          import androidx.core.content.ContextCompat;
           import com.getcapacitor.BridgeActivity;
+          import java.io.File;
           import java.io.FileWriter;
           import java.io.PrintWriter;
           import java.text.SimpleDateFormat;
@@ -102,93 +99,92 @@ jobs:
           import java.util.Locale;
           
           public class MainActivity extends BridgeActivity {
-              private static final String LOG_FILE = "/sdcard/chatbox_debug.log";
-              private static final int REQUEST_WRITE_STORAGE = 1001;
-              private boolean permissionGranted = false;
+              private static final String TAG = "ChatboxDebug";
+              private File logFile;
               
               private void log(String message) {
-                  try {
-                      String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-                      FileWriter fw = new FileWriter(LOG_FILE, true);
-                      PrintWriter pw = new PrintWriter(fw);
-                      pw.println(timestamp + " " + message);
-                      pw.close();
-                  } catch (Exception e) {
-                      android.util.Log.e("ChatboxDebug", "Failed to write log: " + e.getMessage());
-                      e.printStackTrace();
-                  }
-              }
-              
-              private void checkAndRequestPermission() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                      permissionGranted = true;
-                      log("Android 13+: Storage permission not required");
-                      return;
-                  }
+                  // 1. 输出到系统日志（100%可靠）
+                  Log.d(TAG, message);
                   
-                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
-                          != PackageManager.PERMISSION_GRANTED) {
-                      log("Storage permission not granted, requesting...");
-                      ActivityCompat.requestPermissions(this,
-                              new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},
-                              REQUEST_WRITE_STORAGE);
-                  } else {
-                      permissionGranted = true;
-                      log("Storage permission already granted");
-                  }
-              }
-              
-              @Override
-              public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-                  super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-                  if (requestCode == REQUEST_WRITE_STORAGE) {
-                      if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                          permissionGranted = true;
-                          log("Storage permission granted by user");
-                      } else {
-                          log("Storage permission DENIED by user - logging will fail!");
+                  // 2. 同时写入应用内部文件
+                  try {
+                      if (logFile == null) {
+                          File logDir = getExternalFilesDir(null);
+                          if (logDir != null) {
+                              logFile = new File(logDir, "chatbox_debug.log");
+                          }
                       }
+                      
+                      if (logFile != null) {
+                          String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
+                          FileWriter fw = new FileWriter(logFile, true);
+                          PrintWriter pw = new PrintWriter(fw);
+                          pw.println(timestamp + " " + message);
+                          pw.close();
+                      }
+                  } catch (Exception e) {
+                      Log.e(TAG, "Failed to write to file: " + e.getMessage());
                   }
               }
               
               @Override
               public void onCreate(Bundle savedInstanceState) {
-                  checkAndRequestPermission();
-                  
+                  log("========================================");
                   log("=== MainActivity onCreate START ===");
-                  log("Android Version: " + Build.VERSION.SDK_INT);
+                  log("Android Version: " + android.os.Build.VERSION.SDK_INT);
                   log("Package: xyz.chatboxapp.ce");
                   
+                  // 输出日志文件路径
+                  File logDir = getExternalFilesDir(null);
+                  if (logDir != null) {
+                      log("Log file path: " + logDir.getAbsolutePath() + "/chatbox_debug.log");
+                  }
+                  
                   try {
+                      log("Calling super.onCreate()...");
                       super.onCreate(savedInstanceState);
-                      log("super.onCreate() completed");
+                      log("✅ super.onCreate() completed");
                       
-                      if (bridge != null && bridge.getWebView() != null) {
-                          WebView webView = bridge.getWebView();
+                      if (bridge != null) {
+                          log("✅ Bridge initialized");
                           
-                          WebView.setWebContentsDebuggingEnabled(true);
-                          log("WebView debugging enabled");
-                          
-                          webView.setWebChromeClient(new WebChromeClient() {
-                              @Override
-                              public boolean onConsoleMessage(ConsoleMessage cm) {
-                                  log("WebView Console: [" + cm.messageLevel() + "] " + cm.message() + 
-                                      " -- From line " + cm.lineNumber() + " of " + cm.sourceId());
-                                  return true;
-                              }
-                          });
-                          log("WebView console logging enabled");
-                          
-                          String url = webView.getUrl();
-                          log("WebView URL: " + (url != null ? url : "null"));
+                          if (bridge.getWebView() != null) {
+                              WebView webView = bridge.getWebView();
+                              log("✅ WebView obtained");
+                              
+                              // 启用 WebView 调试
+                              WebView.setWebContentsDebuggingEnabled(true);
+                              log("✅ WebView debugging enabled");
+                              
+                              // 设置 WebChromeClient 捕获 console 输出
+                              webView.setWebChromeClient(new WebChromeClient() {
+                                  @Override
+                                  public boolean onConsoleMessage(ConsoleMessage cm) {
+                                      log("WebView Console [" + cm.messageLevel() + "]: " + cm.message() + 
+                                          " -- Line " + cm.lineNumber() + " of " + cm.sourceId());
+                                      return true;
+                                  }
+                                  
+                                  @Override
+                                  public void onProgressChanged(WebView view, int newProgress) {
+                                      log("WebView loading progress: " + newProgress + "%");
+                                  }
+                              });
+                              log("✅ WebChromeClient configured");
+                              
+                              String url = webView.getUrl();
+                              log("WebView current URL: " + (url != null ? url : "null"));
+                          } else {
+                              log("❌ WARNING: WebView is null!");
+                          }
                       } else {
-                          log("WARNING: bridge or WebView is null!");
+                          log("❌ WARNING: Bridge is null!");
                       }
                       
                       log("=== MainActivity onCreate COMPLETE ===");
                   } catch (Exception e) {
-                      log("ERROR in onCreate: " + e.getMessage());
-                      log("Stack trace: " + android.util.Log.getStackTraceString(e));
+                      log("❌ ERROR in onCreate: " + e.getMessage());
+                      log("Stack trace: " + Log.getStackTraceString(e));
                       throw e;
                   }
               }
@@ -224,8 +220,9 @@ jobs:
           }
           JAVA_EOF
           
-          echo "✅ MainActivity injected with debug logging and storage permission request"
-          echo "   Log file will be: /sdcard/chatbox_debug.log"
+          echo "✅ MainActivity with dual logging (System Log + Internal File)"
+          echo "   System log tag: ChatboxDebug"
+          echo "   File path: /sdcard/Android/data/xyz.chatboxapp.ce/files/chatbox_debug.log"
       
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
@@ -330,7 +327,7 @@ jobs:
               
               original_size = len(content)
               
-              # 1. 替换 %PUBLIC_URL% 占位符为相对路径
+              # 1. 替换 %PUBLIC_URL% 占位符
               public_url_count = content.count('%PUBLIC_URL%')
               content = content.replace('%PUBLIC_URL%', '.')
               
@@ -350,34 +347,20 @@ jobs:
                   f.write(content)
               
               removed_size = original_size - len(content)
-              print(f"✅ HTML processed for mobile")
-              print(f"   Replaced %PUBLIC_URL%: {public_url_count} occurrences")
-              print(f"   Original size: {original_size} bytes")
-              print(f"   New size: {len(content)} bytes")
-              print(f"   Removed: {removed_size} bytes")
+              print(f"✅ HTML processed")
+              print(f"   %PUBLIC_URL% replaced: {public_url_count}")
+              print(f"   Size: {original_size} → {len(content)} bytes (-{removed_size})")
               
-          except FileNotFoundError:
-              print(f"ERROR: {html_file} not found", file=sys.stderr)
-              sys.exit(1)
           except Exception as e:
               print(f"ERROR: {e}", file=sys.stderr)
               sys.exit(1)
           PYTHON_EOF
             
-            echo ""
-            echo "Verification:"
             if grep -q "%PUBLIC_URL%" "$INDEX_HTML"; then
               echo "::error::%PUBLIC_URL% still present!"
               exit 1
-            else
-              echo "  ✅ %PUBLIC_URL% replaced"
             fi
-            
-            if grep -q "googletagmanager.com\|plausible.midway.run" "$INDEX_HTML"; then
-              echo "::warning::External scripts still present"
-            else
-              echo "  ✅ External scripts removed"
-            fi
+            echo "✅ Verification passed"
           else
             echo "::error::index.html not found!"
             exit 1
@@ -389,133 +372,53 @@ jobs:
       - name: Verify Capacitor sync
         run: |
           ASSETS="android/app/src/main/assets"
-          if [ -d "$ASSETS/public" ]; then
-            DIR="$ASSETS/public"
-          elif [ -d "$ASSETS/www" ]; then
-            DIR="$ASSETS/www"
-          else
-            echo "::error::Assets directory not found"
-            exit 1
-          fi
-          
+          DIR="$ASSETS/public"
+          [ -d "$DIR" ] || DIR="$ASSETS/www"
+          [ -d "$DIR" ] || { echo "::error::Assets not found"; exit 1; }
           [ -f "$DIR/index.html" ] || { echo "::error::index.html not synced"; exit 1; }
-          echo "✅ Sync verified ($(du -sh "$DIR" | cut -f1))"
           
           if grep -q "%PUBLIC_URL%" "$DIR/index.html"; then
-            echo "::error::CRITICAL: %PUBLIC_URL% found in synced HTML!"
+            echo "::error::%PUBLIC_URL% in synced HTML!"
             exit 1
-          else
-            echo "✅ Synced HTML verified: no %PUBLIC_URL% placeholders"
           fi
-
-      - name: Add WRITE_EXTERNAL_STORAGE permission
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q "WRITE_EXTERNAL_STORAGE" "$MANIFEST"; then
-            sed -i '/<\/manifest>/i\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />' "$MANIFEST"
-            echo "✅ Added WRITE_EXTERNAL_STORAGE permission (maxSdkVersion=32)"
-          else
-            echo "✅ WRITE_EXTERNAL_STORAGE permission already exists"
-          fi
-          
-          echo ""
-          echo "Manifest permissions:"
-          grep -A2 -B2 "uses-permission" "$MANIFEST" || echo "No permissions found"
-
-      - name: Complete Android diagnostics
-        shell: bash
-        run: |
-          set +e
-          echo "======================================"
-          echo "=== COMPLETE ANDROID DIAGNOSTICS ==="
-          echo "======================================"
-          
-          echo ""
-          echo "=== 1. MainActivity Injection Verification ==="
-          MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
-          if [ -f "$MAIN_JAVA" ]; then
-            echo "✅ MainActivity.java exists"
-            echo "File size: $(wc -c < "$MAIN_JAVA") bytes"
-            echo "Contains logging: $(grep -c 'log(' "$MAIN_JAVA" || echo 0) occurrences"
-            echo "Permission request: $(grep -c 'REQUEST_WRITE_STORAGE' "$MAIN_JAVA" || echo 0) occurrences"
-            echo "Method signatures:"
-            grep -E "public void (onStart|onResume|onPause|onDestroy)" "$MAIN_JAVA" || echo "No lifecycle methods found"
-          else
-            echo "❌ MainActivity.java not found!"
-          fi
-          
-          echo ""
-          echo "=== 2. Manifest Permissions ==="
-          grep "WRITE_EXTERNAL_STORAGE\|INTERNET" android/app/src/main/AndroidManifest.xml || echo "No relevant permissions found"
-          
-          echo ""
-          echo "=== 3. Synced index.html ==="
-          SYNCED_HTML="android/app/src/main/assets/public/index.html"
-          if [ -f "$SYNCED_HTML" ]; then
-            echo "File size: $(wc -c < "$SYNCED_HTML") bytes"
-            echo ""
-            echo "--- First 1500 chars ---"
-            head -c 1500 "$SYNCED_HTML"
-            echo ""
-          fi
-          
-          echo ""
-          echo "=== 4. JavaScript Files ==="
-          JS_COUNT=$(find android/app/src/main/assets/public -name "*.js" 2>/dev/null | wc -l || echo "0")
-          echo "Total: $JS_COUNT files"
-          
-          echo ""
-          echo "======================================"
-          echo "📱 Usage Instructions:"
-          echo "1. Install APK on device"
-          echo "2. Launch app (ALLOW storage permission when prompted)"
-          echo "3. Run: cat /sdcard/chatbox_debug.log"
-          echo "4. Send log content for analysis"
-          echo "======================================"
-          set -e
+          echo "✅ Sync verified ($(du -sh "$DIR" | cut -f1))"
 
       - name: Prepare release keystore with caching
         run: |
           mkdir -p .github/cache
           
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
-            echo "Using Secrets keystore (official release)"
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
-            cat > android/key.properties << 'KEYEOF'
+            cat > android/key.properties << 'EOF'
           storeFile=upload-keystore.jks
           storePassword=${{ secrets.KEYSTORE_PASSWORD }}
           keyAlias=${{ secrets.KEY_ALIAS }}
           keyPassword=${{ secrets.KEY_PASSWORD }}
-          KEYEOF
-            echo "✅ Release keystore configured"
+          EOF
+            echo "✅ Release keystore"
           else
             if [ -f ".github/cache/upload-keystore.jks" ]; then
-              echo "✅ Reusing cached auto-generated keystore (supports upgrade)"
               cp .github/cache/upload-keystore.jks android/app/upload-keystore.jks
             else
-              echo "🔑 Generating new auto-keystore (first build)"
               keytool -genkey -v -keystore android/app/upload-keystore.jks \
                 -keyalg RSA -keysize 2048 -validity 10000 \
                 -storepass android -keypass android -alias androiddebugkey \
-                -dname "CN=Chatbox Auto Build,O=Chatbox,C=CN"
+                -dname "CN=Chatbox,O=Chatbox,C=CN"
               cp android/app/upload-keystore.jks .github/cache/upload-keystore.jks
-              echo "💾 Cached keystore for future builds"
             fi
             
-            cat > android/key.properties << 'KEYEOF'
+            cat > android/key.properties << 'EOF'
           storeFile=upload-keystore.jks
           storePassword=android
           keyAlias=androiddebugkey
           keyPassword=android
-          KEYEOF
-            echo "✅ Auto keystore configured (upgradeable)"
+          EOF
+            echo "✅ Auto keystore"
           fi
 
       - name: Configure build for arm64 and signing
         run: |
-          rm -f android/app/arm64-config.gradle || true
-          
-          cat > android/app/arm64-config.gradle << 'GRADLEEOF'
+          cat > android/app/arm64-config.gradle << 'EOF'
           def keystoreFile = rootProject.file('key.properties')
           def keystoreProps = new Properties()
           def hasKeystore = keystoreFile.exists()
@@ -525,18 +428,12 @@ jobs:
           
           android {
               splits {
-                  abi {
-                      enable false
-                  }
-                  density {
-                      enable false
-                  }
+                  abi { enable false }
+                  density { enable false }
               }
               
               defaultConfig {
-                  ndk {
-                      abiFilters "arm64-v8a"
-                  }
+                  ndk { abiFilters "arm64-v8a" }
               }
               
               if (hasKeystore) {
@@ -556,38 +453,27 @@ jobs:
                   }
               }
           }
-          GRADLEEOF
+          EOF
           
-          if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle 2>/dev/null; then
+          if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle; then
             echo "" >> android/app/build.gradle
             echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
           fi
-          
-          echo "✅ Build configuration applied"
-
-      - name: Make gradlew executable
-        run: chmod +x android/gradlew || true
+          echo "✅ Build config"
 
       - name: Build release APK
         run: |
           cd android
+          chmod +x gradlew
           ./gradlew assembleRelease --stacktrace --build-cache
           cd ..
 
-      - name: Package and rename APK
+      - name: Package APK
         id: apk
         run: |
           APK="android/app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$APK" ]; then
-            APK=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*unsigned*" 2>/dev/null | head -1 || true)
-          fi
-          
-          if [ -z "$APK" ] || [ ! -f "$APK" ]; then
-            echo "::error::APK not found"
-            echo "Available files:"
-            find android/app/build/outputs -type f 2>/dev/null || true
-            exit 1
-          fi
+          [ -f "$APK" ] || APK=$(find android/app/build/outputs/apk/release -name "*-release.apk" ! -name "*unsigned*" | head -1)
+          [ -f "$APK" ] || { echo "::error::APK not found"; exit 1; }
           
           VER=$(node -p "require('./package.json').version")
           PROD=$(node -p "require('./package.json').productName||'chatbox'")
@@ -597,16 +483,24 @@ jobs:
           cp "$APK" "artifacts/$NAME"
           
           echo "apk_name=$NAME" >> $GITHUB_OUTPUT
-          echo "✅ Packaged: $NAME ($(ls -lh artifacts/$NAME | awk '{print $5}'))"
+          echo "✅ $NAME ($(ls -lh artifacts/$NAME | awk '{print $5}'))"
           echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "📱 IMPORTANT:"
-          echo "1. Install APK"
-          echo "2. Launch app - CLICK ALLOW when permission dialog appears"
-          echo "3. Run: cat /sdcard/chatbox_debug.log"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "📱 DEBUG INSTRUCTIONS:"
+          echo ""
+          echo "1️⃣  Install APK and launch app"
+          echo ""
+          echo "2️⃣  Get System Log (recommended):"
+          echo "    logcat -d -s ChatboxDebug:* > /sdcard/log.txt"
+          echo "    cat /sdcard/log.txt"
+          echo ""
+          echo "3️⃣  Or get File Log:"
+          echo "    cat /sdcard/Android/data/xyz.chatboxapp.ce/files/chatbox_debug.log"
+          echo ""
+          echo "4️⃣  Send log content for analysis"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: Upload APK artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: chatbox-android-arm64-v8a-debug
