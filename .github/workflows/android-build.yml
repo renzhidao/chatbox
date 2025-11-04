@@ -1,13 +1,9 @@
-name: Build Chatbox Android APK (Final, Corrected Order & Fully Restored)
+name: Build Chatbox Android APK (Final, Correct Directory & Order)
 
 on:
   push:
     branches:
       - main
-    paths-ignore:
-      - "**.md"
-      - "doc/**"
-      - "docs/**"
   workflow_dispatch:
 
 jobs:
@@ -27,49 +23,32 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      # --- 缓存步骤，100% 恢复你成功的原版 ---
+      # --- 所有缓存步骤，100% 恢复你成功的原版 ---
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-modules-
       - name: Cache Gradle Wrapper
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.gradle/wrapper
-            android/gradle/wrapper
-          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties') }}
+          path: ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('**/gradle-wrapper.properties') }}
       - name: Cache auto-generated keystore
         uses: actions/cache@v4
         with:
           path: .github/cache/upload-keystore.jks
           key: ${{ runner.os }}-auto-keystore
 
-      - name: Create capacitor.config.ts
-        run: |
-          cat > capacitor.config.ts << 'EOF'
-          import { CapacitorConfig } from '@capacitor/cli';
-          const config: CapacitorConfig = { appId: 'xyz.chatboxapp.ce', appName: 'Chatbox', webDir: 'release/app/dist/renderer', plugins: { CapacitorHttp: { enabled: true } } };
-          export default config;
-          EOF
-
-      - name: Install dependencies and patches
+      - name: Install dependencies and Add platform
         run: |
           npm install --ignore-scripts
           npx patch-package || true
-          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; else echo "::warning::Sharp install failed"; fi
-
-      - name: Add Android platform (if not exists)
-        run: |
-          if [ ! -d "android" ]; then
-            echo "Android platform not found, adding it..."
-            npx cap add android
-          else
-            echo "Android platform already exists, skipping 'add' command."
-          fi
+          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; fi
+          if [ ! -d "android" ]; then npx cap add android; fi
+          
+      - name: Create capacitor.config.ts
+        run: echo "import { CapacitorConfig } from '@capacitor/cli'; const config: CapacitorConfig = { appId: 'xyz.chatboxapp.ce', appName: 'Chatbox', webDir: 'release/app/dist/renderer', plugins: { CapacitorHttp: { enabled: true } } }; export default config;" > capacitor.config.ts
 
       - name: Setup Java and Gradle
         uses: actions/setup-java@v4
@@ -78,7 +57,7 @@ jobs:
           java-version: '17'
           cache: 'gradle'
       
-      - name: Generate Android assets (original restored)
+      - name: Generate Android assets
         run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
       
       - name: Build Web, Fix HTML, and Sync
@@ -89,11 +68,12 @@ jobs:
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
           npx cap sync android
 
-      # --- 核心修复：所有原生文件修改，必须在 `npx cap sync` 之后！ ---
-      - name: Patch Native Android Files (Correct Order)
+      # --- 核心修复：进入 android 目录执行所有原生文件修改！ ---
+      - name: Patch Native Android Files (Correct Directory)
+        working-directory: ./android  # <--- 关键！强制指定工作目录
         run: |
-          # 1. 注入带日志和权限请求的 MainActivity
-          MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
+          # 1. 注入带日志和权限请求的 MainActivity (路径现在是相对 ./android 的)
+          MAIN_JAVA="app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
@@ -164,17 +144,18 @@ jobs:
               }
           }
           JAVA_EOF
-          echo "✅ MainActivity injected AFTER sync."
+          echo "✅ MainActivity injected inside ./android directory."
 
-          # 2. 修改 AndroidManifest 和网络配置
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          # 2. 修改 AndroidManifest 和网络配置 (路径现在是相对 ./android 的)
+          MANIFEST="app/src/main/AndroidManifest.xml"
           if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"; fi
           if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"; fi
-          NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
+          NSC_FILE="app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
-          echo "✅ AndroidManifest and Network Config patched AFTER sync."
+          echo "✅ AndroidManifest and Network Config patched inside ./android directory."
 
+      # --- 后续步骤，100% 恢复原版 ---
       - name: Prepare Keystore (original restored)
         run: |
           mkdir -p .github/cache
@@ -212,10 +193,8 @@ jobs:
           fi
 
       - name: Build Release APK
-        run: |
-          cd android
-          ./gradlew assembleRelease --stacktrace
-          cd ..
+        working-directory: ./android # 确保在正确的目录下执行
+        run: ./gradlew assembleRelease --stacktrace
 
       - name: Package APK (original restored)
         id: package_apk
