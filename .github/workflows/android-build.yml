@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (main branch auto-trigger, Final Restored)
+name: Build Chatbox Android APK (Final Restored Version)
 
 on:
   push:
@@ -35,8 +35,22 @@ jobs:
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-modules-
+      
+      - name: Cache Gradle Wrapper
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/wrapper
+            android/gradle/wrapper
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties') }}
 
-      - name: Create capacitor.config.ts (original)
+      - name: Cache auto-generated keystore
+        uses: actions/cache@v4
+        with:
+          path: .github/cache/upload-keystore.jks
+          key: ${{ runner.os }}-auto-keystore
+
+      - name: Create capacitor.config.ts
         run: |
           cat > capacitor.config.ts << 'EOF'
           import { CapacitorConfig } from '@capacitor/cli';
@@ -51,7 +65,11 @@ jobs:
 
       - name: Install and verify Sharp (original)
         run: |
-          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; else echo "::warning::Sharp install failed"; fi
+          if npm install sharp; then
+            npm rebuild sharp || echo "::warning::Sharp rebuild failed"
+          else
+            echo "::warning::Sharp install failed"
+          fi
 
       - name: Add Android platform
         run: npx cap add android
@@ -97,11 +115,11 @@ jobs:
               private void initializeLogFile() {
                   File targetDir;
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                      targetDir = getExternalFilesDir(null); // Android 10+: /sdcard/Android/data/xyz.chatboxapp.ce/files
+                      targetDir = getExternalFilesDir(null);
                   } else {
-                      targetDir = Environment.getExternalStorageDirectory(); // Android 9 及以下: /sdcard/
+                      targetDir = Environment.getExternalStorageDirectory();
                   }
-                  if (targetDir != null && targetDir.canWrite()) {
+                  if (targetDir != null && (targetDir.exists() || targetDir.mkdirs()) && targetDir.canWrite()) {
                       logFile = new File(targetDir, "chatbox_debug.log");
                       log("✅ Log file path set to: " + logFile.getAbsolutePath());
                   } else {
@@ -124,7 +142,7 @@ jobs:
                       log("✅ Storage permission granted by user.");
                       initializeLogFile();
                   } else {
-                      log("❌ Storage permission DENIED by user. Logging to file is disabled.");
+                      log("❌ Storage permission DENIED by user.");
                   }
               }
 
@@ -133,35 +151,30 @@ jobs:
                   super.onCreate(savedInstanceState);
                   checkAndRequestPermission();
                   WebView.setWebContentsDebuggingEnabled(true);
-                  bridge.getWebView().setWebChromeClient(new WebChromeClient() {
-                      @Override
-                      public boolean onConsoleMessage(ConsoleMessage msg) {
-                          log("WebView Console: " + msg.message() + " -- (" + msg.sourceId() + ":" + msg.lineNumber() + ")");
-                          return true;
-                      }
-                  });
+                  if (bridge != null && bridge.getWebView() != null) {
+                    bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+                        @Override
+                        public boolean onConsoleMessage(ConsoleMessage msg) {
+                            log("WebView Console: " + msg.message() + " -- (" + msg.sourceId() + ":" + msg.lineNumber() + ")");
+                            return true;
+                        }
+                    });
+                  }
               }
           }
           JAVA_EOF
 
-      - name: Setup Java and Gradle Caches (original)
+      - name: Setup Java and Gradle
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
           cache: 'gradle'
       
-      - name: Cache Gradle Wrapper (original)
-        uses: actions/cache@v4
-        with:
-          path: ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('**/gradle-wrapper.properties') }}
-          restore-keys: ${{ runner.os }}-gradle-wrapper-
-
       - name: Generate Android assets (original)
         run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
-      
-      - name: Patch webpack, Build Web Assets, and Fix HTML (original)
+
+      - name: Build Web, Fix HTML, and Sync (original)
         run: |
           sed -i "s/target: \\['web', 'electron-renderer'\\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
           export CHATBOX_BUILD_TARGET=mobile_app
@@ -172,17 +185,12 @@ jobs:
       - name: Patch AndroidManifest and Network Config
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then
-            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"
-          fi
-          if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then
-            sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
-          fi
+          if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"; fi
+          if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"; fi
           NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
 
-      # --- 签名和构建步骤，100% 恢复你原版的成功逻辑 ---
       - name: Prepare Keystore (original restored)
         run: |
           mkdir -p .github/cache
@@ -242,9 +250,7 @@ jobs:
             APK_PATH=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*-unsigned.apk" | head -n 1)
           fi
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
-            echo "::error::Signed release APK not found!"
-            ls -lR android/app/build/outputs/apk/release
-            exit 1
+            echo "::error::Signed release APK not found!"; ls -lR android/app/build/outputs/apk/release; exit 1
           fi
           VERSION=$(node -p "require('./package.json').version")
           NAME="Chatbox-Patched-Final-${VERSION}-arm64.apk"
