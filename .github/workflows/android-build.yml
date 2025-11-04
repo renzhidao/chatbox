@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Final Restored Version)
+name: Build Chatbox Android APK (Final Corrected Order)
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 
 jobs:
   build-android-arm64-final:
-    name: Build Android (arm64-v8a) - Final Restored
+    name: Build Android (arm64-v8a) - Final Corrected
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,7 +27,6 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      # --- 缓存步骤，完全恢复原版 ---
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
@@ -35,7 +34,7 @@ jobs:
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
           restore-keys: |
             ${{ runner.os }}-node-modules-
-      
+
       - name: Cache Gradle Wrapper
         uses: actions/cache@v4
         with:
@@ -62,9 +61,6 @@ jobs:
         run: |
           npm install --ignore-scripts
           npx patch-package || true
-
-      - name: Install and verify Sharp (original)
-        run: |
           if npm install sharp; then
             npm rebuild sharp || echo "::warning::Sharp rebuild failed"
           else
@@ -74,9 +70,28 @@ jobs:
       - name: Add Android platform
         run: npx cap add android
 
-      # --- 注入带增强日志和权限请求的 MainActivity ---
-      - name: Inject Patched MainActivity for Logging
+      - name: Setup Java and Gradle
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+      
+      - name: Generate Android assets
+        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
+      
+      - name: Build Web, Fix HTML, and Sync
         run: |
+          sed -i "s/target: \\['web', 'electron-renderer'\\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
+          export CHATBOX_BUILD_TARGET=mobile_app
+          npm run build:renderer
+          python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
+          npx cap sync android
+
+      # --- 核心修复：所有原生文件修改，必须在 `npx cap sync` 之后！ ---
+      - name: Inject Patched MainActivity and Fix Manifest (Correct Order)
+        run: |
+          # 1. 注入带日志和权限请求的 MainActivity
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
@@ -163,33 +178,16 @@ jobs:
               }
           }
           JAVA_EOF
+          echo "✅ MainActivity injected AFTER sync."
 
-      - name: Setup Java and Gradle
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-          cache: 'gradle'
-      
-      - name: Generate Android assets (original)
-        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
-
-      - name: Build Web, Fix HTML, and Sync (original)
-        run: |
-          sed -i "s/target: \\['web', 'electron-renderer'\\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
-          export CHATBOX_BUILD_TARGET=mobile_app
-          npm run build:renderer
-          python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
-          npx cap sync android
-
-      - name: Patch AndroidManifest and Network Config
-        run: |
+          # 2. 修改 AndroidManifest 和网络配置
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"; fi
           if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"; fi
           NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
+          echo "✅ AndroidManifest and Network Config patched AFTER sync."
 
       - name: Prepare Keystore (original restored)
         run: |
@@ -220,16 +218,7 @@ jobs:
       - name: Configure build.gradle (original restored)
         run: |
           cat > android/app/arm64-config.gradle << 'EOF'
-          def keystoreFile = rootProject.file('key.properties')
-          def keystoreProps = new Properties()
-          if (keystoreFile.exists()) { keystoreProps.load(new FileInputStream(keystoreFile)) }
-          android {
-              if (keystoreFile.exists()) {
-                  signingConfigs { release { storeFile file(keystoreProps['storeFile']); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }
-                  buildTypes { release { signingConfig signingConfigs.release } }
-              }
-              defaultConfig { ndk { abiFilters "arm64-v8a" } }
-          }
+          def keystoreFile = rootProject.file('key.properties'); def keystoreProps = new Properties(); if (keystoreFile.exists()) { keystoreProps.load(new FileInputStream(keystoreFile)) }; android { if (keystoreFile.exists()) { signingConfigs { release { storeFile file(keystoreProps['storeFile']); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }; buildTypes { release { signingConfig signingConfigs.release } } }; defaultConfig { ndk { abiFilters "arm64-v8a" } } }
           EOF
           if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle; then
             echo "" >> android/app/build.gradle
