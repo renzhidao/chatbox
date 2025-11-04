@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Final, YAML Syntax Corrected)
+name: Build Chatbox Android APK (Final, Path Corrected)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-android-arm64-final:
-    name: Build Android (arm64-v8a) - Final Corrected
+    name: Build Android (arm64-v8a) - Final Path Corrected
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,24 +23,19 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      # --- 所有缓存步骤，100% 恢复你成功的原版 ---
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
-      - name: Cache Gradle Wrapper
-        uses: actions/cache@v4
-        with:
-          path: ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('**/gradle-wrapper.properties') }}
-      - name: Cache auto-generated keystore
-        uses: actions/cache@v4
-        with:
-          path: .github/cache/upload-keystore.jks
-          key: ${{ runner.os }}-auto-keystore
 
-      # --- 核心修复 1：使用多行脚本格式，避免 YAML 语法错误 ---
+      - name: Install dependencies and Add platform
+        run: |
+          npm install --ignore-scripts
+          npx patch-package || true
+          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; fi
+          if [ ! -d "android" ]; then npx cap add android; fi
+          
       - name: Create capacitor.config.ts
         run: |
           cat > capacitor.config.ts << 'EOF'
@@ -48,22 +43,6 @@ jobs:
           const config: CapacitorConfig = { appId: 'xyz.chatboxapp.ce', appName: 'Chatbox', webDir: 'release/app/dist/renderer', plugins: { CapacitorHttp: { enabled: true } } };
           export default config;
           EOF
-
-      - name: Install dependencies and patches
-        run: |
-          npm install --ignore-scripts
-          npx patch-package || true
-          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; fi
-
-      # --- 修复 2：增加存在性检查，使此步骤可重复运行 ---
-      - name: Add Android platform (if not exists)
-        run: |
-          if [ ! -d "android" ]; then
-            echo "Android platform not found, adding it..."
-            npx cap add android
-          else
-            echo "Android platform already exists, skipping 'add' command."
-          fi
 
       - name: Setup Java and Gradle
         uses: actions/setup-java@v4
@@ -83,13 +62,12 @@ jobs:
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
           npx cap sync android
 
-      # --- 修复 3：所有原生文件修改，在正确的时机和目录下执行 ---
-      - name: Patch Native Android Files (Correct Directory & Order)
-        working-directory: ./android
+      # --- 核心修复 1: 在根目录执行所有原生文件修改，使用完整路径 ---
+      - name: Patch Native Android Files
         run: |
-          # 注入 MainActivity
-          MAIN_JAVA="app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
+          MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
+          # (注入 MainActivity.java 的代码保持不变)
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
           import android.Manifest;
@@ -159,21 +137,19 @@ jobs:
               }
           }
           JAVA_EOF
-          echo "✅ MainActivity injected inside ./android directory."
 
-          # 修改 AndroidManifest
-          MANIFEST="app/src/main/AndroidManifest.xml"
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"; fi
           if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"; fi
-          NSC_FILE="app/src/main/res/xml/network_security_config.xml"
+          NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
-          echo "✅ AndroidManifest and Network Config patched."
-
-      # --- 后续步骤，100% 恢复原版 ---
-      - name: Prepare Keystore (original restored)
+      
+      # --- 核心修复 2: 签名和构建步骤合并，并强制在正确的目录下执行 ---
+      - name: Prepare Keystore, Configure Gradle, and Build APK
+        working-directory: ./android  # <--- 关键！所有后续操作都在这个目录下
         run: |
-          mkdir -p ../.github/cache
+          # 1. 准备 Keystore (路径现在是相对 ./android 的)
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > app/upload-keystore.jks
             cat > key.properties <<EOF
@@ -183,12 +159,7 @@ jobs:
           keyPassword=${{ secrets.KEY_PASSWORD }}
           EOF
           else
-            if [ -f "../.github/cache/upload-keystore.jks" ]; then
-              cp ../.github/cache/upload-keystore.jks app/upload-keystore.jks
-            else
-              keytool -genkey -v -keystore app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
-              cp app/upload-keystore.jks ../.github/cache/upload-keystore.jks
-            fi
+            keytool -genkey -v -keystore app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
             cat > key.properties <<EOF
           storeFile=app/upload-keystore.jks
           storePassword=android
@@ -196,21 +167,31 @@ jobs:
           keyPassword=android
           EOF
           fi
-        working-directory: ./android
+          echo "✅ Keystore prepared."
 
-      - name: Configure build.gradle (original restored)
-        run: |
-          cat > android/app/arm64-config.gradle << 'EOF'
-          def keystoreFile = rootProject.file('key.properties'); def keystoreProps = new Properties(); if (keystoreFile.exists()) { keystoreProps.load(new FileInputStream(keystoreFile)) }; android { if (keystoreFile.exists()) { signingConfigs { release { storeFile file(keystoreProps['storeFile']); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }; buildTypes { release { signingConfig signingConfigs.release } } }; defaultConfig { ndk { abiFilters "arm64-v8a" } } }
+          # 2. 配置 Gradle (路径现在是相对 ./android 的)
+          cat > app/arm64-config.gradle << 'EOF'
+          def keystoreFile = rootProject.file('key.properties')
+          def keystoreProps = new Properties()
+          if (keystoreFile.exists()) { keystoreProps.load(new FileInputStream(keystoreFile)) }
+          android {
+              if (keystoreFile.exists()) {
+                  signingConfigs { release { storeFile file('app/upload-keystore.jks'); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }
+                  buildTypes { release { signingConfig signingConfigs.release } }
+              }
+              defaultConfig { ndk { abiFilters "arm64-v8a" } }
+          }
           EOF
-          if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle; then
-            echo "" >> android/app/build.gradle
-            echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
+          if ! grep -q "apply from: 'app/arm64-config.gradle'" app/build.gradle; then
+            echo "" >> app/build.gradle
+            echo "apply from: 'app/arm64-config.gradle'" >> app/build.gradle
           fi
+          echo "✅ Gradle configured."
 
-      - name: Build Release APK
-        working-directory: ./android
-        run: ./gradlew assembleRelease --stacktrace
+          # 3. 执行构建
+          chmod +x ./gradlew
+          ./gradlew assembleRelease --stacktrace
+          echo "✅ Build command executed."
 
       - name: Package APK (original restored)
         id: package_apk
