@@ -1,7 +1,6 @@
-name: Build Chatbox Android APK (main branch auto-trigger)
+name: Build Chatbox Android APK (main branch auto-trigger, original find logic)
 
 on:
-  # 当代码被推送到 main 分支时自动触发
   push:
     branches:
       - main
@@ -9,12 +8,11 @@ on:
       - "**.md"
       - "doc/**"
       - "docs/**"
-  # 保留手动触发选项
   workflow_dispatch:
 
 jobs:
-  build-android-arm64-patched:
-    name: Build Android (arm64-v8a) - Patched
+  build-android-arm64-final:
+    name: Build Android (arm64-v8a) - Final Patched
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,54 +39,32 @@ jobs:
         run: |
           cat > capacitor.config.ts << 'EOF'
           import { CapacitorConfig } from '@capacitor/cli';
-          
-          const config: CapacitorConfig = {
-            appId: 'xyz.chatboxapp.ce',
-            appName: 'Chatbox',
-            webDir: 'release/app/dist/renderer',
-            plugins: {
-              CapacitorHttp: { enabled: true },
-            },
-          };
-          
+          const config: CapacitorConfig = { appId: 'xyz.chatboxapp.ce', appName: 'Chatbox', webDir: 'release/app/dist/renderer' };
           export default config;
           EOF
-          echo "✅ Created capacitor.config.ts"
 
-      - name: Install dependencies (without scripts)
-        run: npm install --ignore-scripts
-
-      - name: Apply patches
-        run: npx patch-package || echo "::warning::Patch warnings (non-critical)"
+      - name: Install dependencies and patches
+        run: |
+          npm install --ignore-scripts
+          npx patch-package || true
 
       - name: Install and verify Sharp
         run: |
-          echo "Installing Sharp..."
-          if npm install sharp; then
-            echo "Rebuilding Sharp native bindings..."
-            npm rebuild sharp || echo "::warning::Sharp rebuild failed"
-            
-            echo "Verifying Sharp..."
-            if node -e "require('sharp')" 2>/dev/null; then
-              echo "✅ Sharp is ready"
-            else
-              echo "::warning::Sharp verification failed - will use default icons"
-            fi
+          if ! npm install sharp; then
+            echo "::warning::Sharp install failed, default icons will be used."
           else
-            echo "::warning::Sharp install failed - will use default icons"
+            npm rebuild sharp || echo "::warning::Sharp rebuild failed."
           fi
 
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Inject Patched MainActivity for Debugging
+      - name: Inject Patched MainActivity for Logging
         run: |
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
-          
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
-          
           import android.Manifest;
           import android.content.pm.PackageManager;
           import android.os.Build;
@@ -109,242 +85,163 @@ jobs:
           
           public class MainActivity extends BridgeActivity {
               private static final int REQUEST_STORAGE_PERMISSION = 1001;
-              private boolean permissionGranted = false;
               private File logFile;
-              
+
               private synchronized void log(String message) {
-                  try {
-                      android.util.Log.d("ChatboxDebug", message);
-                      if (!permissionGranted || logFile == null) return;
+                  android.util.Log.d("ChatboxDebug", message);
+                  if (logFile == null) return;
+                  try (PrintWriter pw = new PrintWriter(new FileWriter(logFile, true))) {
                       String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-                      try (FileWriter fw = new FileWriter(logFile, true);
-                           PrintWriter pw = new PrintWriter(fw)) {
-                          pw.println(timestamp + " " + message);
-                      }
+                      pw.println(timestamp + " " + message);
                   } catch (Exception e) {
-                      android.util.Log.e("ChatboxDebug", "Failed to write log: " + e.getMessage());
+                      android.util.Log.e("ChatboxDebug", "Failed to write log", e);
                   }
               }
-              
+
               private void initializeLogFile() {
-                  if (permissionGranted) {
-                      File targetDir;
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                          targetDir = getExternalFilesDir(null);
-                      } else {
-                          targetDir = Environment.getExternalStorageDirectory();
-                      }
-                      if (targetDir != null) {
-                          logFile = new File(targetDir, "chatbox_debug.log");
-                          log("Log file will be written to: " + logFile.getAbsolutePath());
-                      } else {
-                          log("ERROR: Could not get target directory for log file.");
-                      }
+                  File targetDir = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                      ? getExternalFilesDir(null)
+                      : Environment.getExternalStorageDirectory();
+                  if (targetDir != null) {
+                      logFile = new File(targetDir, "chatbox_debug.log");
+                      log("Log file path set to: " + logFile.getAbsolutePath());
                   }
               }
-              
+
               private void checkAndRequestPermission() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                      permissionGranted = true;
-                      log("Android 10+: Using app-specific directory. No special permission needed.");
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ||
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
                       initializeLogFile();
-                      return;
-                  }
-                  
-                  if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                      log("Requesting WRITE_EXTERNAL_STORAGE permission...");
-                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE_PERMISSION);
                   } else {
-                      permissionGranted = true;
-                      log("WRITE_EXTERNAL_STORAGE permission already granted.");
-                      initializeLogFile();
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE_PERMISSION);
                   }
               }
-              
+
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-                  if (requestCode == REQUEST_STORAGE_PERMISSION) {
-                      if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                          permissionGranted = true;
-                          log("Storage permission granted by user.");
-                          initializeLogFile();
-                      } else {
-                          log("Storage permission DENIED by user. Logging to file will fail!");
-                      }
+                  if (requestCode == REQUEST_STORAGE_PERMISSION && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                      initializeLogFile();
+                  } else {
+                      log("Storage permission denied. Logging to file is disabled.");
                   }
               }
-              
+
               @Override
               public void onCreate(Bundle savedInstanceState) {
-                  checkAndRequestPermission();
-                  log("=== MainActivity onCreate START ===");
                   super.onCreate(savedInstanceState);
-                  log("super.onCreate() completed");
-                  
-                  if (bridge != null && bridge.getWebView() != null) {
-                      WebView webView = bridge.getWebView();
-                      WebView.setWebContentsDebuggingEnabled(true);
-                      log("WebView debugging enabled");
-                      
-                      webView.setWebChromeClient(new WebChromeClient() {
-                          @Override
-                          public boolean onConsoleMessage(ConsoleMessage cm) {
-                              log("WebView Console: [" + cm.messageLevel() + "] " + cm.message() + " -- " + cm.sourceId() + ":" + cm.lineNumber());
-                              return true;
-                          }
-                      });
-                      log("WebView console logging to file enabled");
-                  } else {
-                      log("WARNING: bridge or WebView is null!");
-                  }
-                  log("=== MainActivity onCreate COMPLETE ===");
+                  checkAndRequestPermission();
+                  WebView.setWebContentsDebuggingEnabled(true);
+                  bridge.getWebView().setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
+                          log("WebView Console: " + consoleMessage.message() + " -- (" + consoleMessage.sourceId() + ":" + consoleMessage.lineNumber() + ")");
+                          return true;
+                      }
+                  });
               }
           }
           JAVA_EOF
-          echo "✅ MainActivity patched with storage permission request and detailed logging."
-      
+
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
-          cache: 'gradle'
-
-      - name: Cache Gradle Dependencies
-        uses: actions/cache@v4
-        with:
-          path: ~/.gradle/caches
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
-
-      - name: Generate Android assets
-        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, using defaults"
-
-      - name: Accept SDK Licenses
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
 
       - name: Patch webpack config for mobile build
         run: |
-          WEBPACK_CONFIG=".erb/configs/webpack.config.renderer.prod.ts"
-          sed -i "s/target: \['web', 'electron-renderer'\]/target: process.env.CHATBOX_BUILD_TARGET === 'mobile_app' ? ['web'] : ['web', 'electron-renderer']/" "$WEBPACK_CONFIG"
-          echo "✅ Webpack config patched for mobile build"
+          sed -i "s/target: \['web', 'electron-renderer'\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
 
       - name: Build web assets
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
-          export CHATBOX_BUILD_PLATFORM=android
-          export NODE_ENV=production
-          export TS_NODE_TRANSPILE_ONLY=true
           npm run build:renderer
 
       - name: Fix HTML for mobile
         run: |
-          INDEX_HTML="release/app/dist/renderer/index.html"
-          if [ -f "$INDEX_HTML" ]; then
-            # 使用更可靠的 python 来处理，避免 sed 兼容性问题
-            python3 -c "import re; f='$INDEX_HTML'; c=open(f,'r+').read(); c=c.replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c);"
-            echo "✅ HTML processed for mobile compatibility"
-          else
-            echo "::error::index.html not found!"
-            exit 1
-          fi
-
+          python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read(); c=c.replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
+      
       - name: Sync Capacitor assets
         run: npx cap sync android
         
-      - name: Fix AndroidManifest.xml and Network Config
+      - name: Patch AndroidManifest and Network Config
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          
-          # 1. 声明存储权限
           if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then
             sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"
-            echo "✅ Added WRITE_EXTERNAL_STORAGE permission"
           fi
-          
-          # 2. 允许明文流量 (HTTP)
           if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then
-            sed -i '/<application/a\        android:usesCleartextTraffic="true"' "$MANIFEST"
-            echo "✅ Added usesCleartextTraffic=true"
+            sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
           fi
-          
-          # 3. 指定网络安全配置
-          if ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
-            sed -i '/<application/a\        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
-            echo "✅ Added networkSecurityConfig attribute"
-          fi
-          
-          # 4. 创建一个开放的网络安全配置文件
-          NSC_DIR="android/app/src/main/res/xml"
-          mkdir -p "$NSC_DIR"
-          cat > "$NSC_DIR/network_security_config.xml" << 'XML_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <network-security-config>
-              <base-config cleartextTrafficPermitted="true">
-                  <trust-anchors>
-                      <certificates src="system" />
-                  </trust-anchors>
-              </base-config>
-          </network-security-config>
-          XML_EOF
-          echo "✅ Created permissive network_security_config.xml"
+          NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
+          mkdir -p "$(dirname "$NSC_FILE")"
+          echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
 
-      - name: Prepare release keystore
+      - name: Prepare Keystore (original logic)
         run: |
-          # (保留原版的签名逻辑)
-          mkdir -p .github/cache
-          if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
-            # ... (省略 secret 部分)
-          else
-            if [ -f ".github/cache/upload-keystore.jks" ]; then
-              cp .github/cache/upload-keystore.jks android/app/upload-keystore.jks
-            else
-              keytool -genkey -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
-              cp android/app/upload-keystore.jks .github/cache/upload-keystore.jks
-            fi
-            cat > android/key.properties << 'EOF'
+          keytool -genkey -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
+          cat > android/key.properties <<EOF
           storeFile=upload-keystore.jks
           storePassword=android
           keyAlias=androiddebugkey
           keyPassword=android
           EOF
-            echo "✅ Using auto-generated debug keystore"
-          fi
 
-      - name: Configure build.gradle
+      - name: Configure build.gradle (original logic)
         run: |
-          # (保留原版的 gradle 配置逻辑)
           if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle; then
             echo "" >> android/app/build.gradle
-            cat > android/app/arm64-config.gradle << 'EOF'
-          android {
-              splits { abi { enable false }; density { enable false } }
-              defaultConfig { ndk { abiFilters "arm64-v8a" } }
-          }
-          EOF
             echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
+            cat > android/app/arm64-config.gradle << 'EOF'
+            def keystoreFile = rootProject.file('key.properties')
+            def keystoreProps = new Properties()
+            if (keystoreFile.exists()) { keystoreProps.load(new FileInputStream(keystoreFile)) }
+            android {
+                if (keystoreFile.exists()) {
+                    signingConfigs { release { storeFile file(keystoreProps['storeFile']); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }
+                    buildTypes { release { signingConfig signingConfigs.release } }
+                }
+                defaultConfig { ndk { abiFilters "arm64-v8a" } }
+            }
+            EOF
           fi
-          echo "✅ Gradle configured for arm64"
 
-      - name: Build release APK
+      - name: Build Release APK
         run: |
           cd android
-          chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace --build-cache
+          ./gradlew assembleRelease --stacktrace
           cd ..
 
+      # --- Package and Upload (100% restored to your successful version) ---
       - name: Package APK
         id: package_apk
         run: |
-          APK=$(find android/app/build/outputs/apk/release -name "app-release.apk" | head -1)
-          [ -f "$APK" ] || { echo "::error::Signed APK not found"; exit 1; }
+          # 1. 优先尝试最常见的固定路径 (Restore original logic)
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          
+          # 2. 如果固定路径找不到，则使用 find 命令作为备用方案
+          if [ ! -f "$APK_PATH" ]; then
+            echo "Fixed path 'app-release.apk' not found, trying find command as fallback..."
+            APK_PATH=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*-unsigned.apk" | head -n 1)
+          fi
+          
+          # 3. 最终检查
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::error::Signed release APK not found after all attempts!"
+            echo "Listing contents of release directory for debugging:"
+            ls -lR android/app/build/outputs/apk/release
+            exit 1
+          fi
+
+          echo "Found APK at: $APK_PATH"
+          
           VERSION=$(node -p "require('./package.json').version")
-          NAME="Chatbox-Patched-Auto-${VERSION}-arm64.apk"
+          NAME="Chatbox-Patched-Final-${VERSION}-arm64.apk"
+          
           mkdir -p artifacts
-          cp "$APK" "artifacts/$NAME"
+          cp "$APK_PATH" "artifacts/$NAME"
+          
           echo "apk_name=$NAME" >> $GITHUB_OUTPUT
           echo "✅ Packaged as $NAME"
 
