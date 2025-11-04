@@ -1,15 +1,20 @@
-name: Build Chatbox Android APK (Ultimate Debug Edition v3 - Fixed)
+name: Build Chatbox Android APK (main branch auto-trigger)
 
 on:
-  workflow_dispatch:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  # 当代码被推送到 main 分支时自动触发
+  push:
+    branches:
+      - main
     paths-ignore:
       - "**.md"
+      - "doc/**"
+      - "docs/**"
+  # 保留手动触发选项
+  workflow_dispatch:
 
 jobs:
-  build-android-arm64-debug:
-    name: Build Android for Debug (arm64-v8a)
+  build-android-arm64-patched:
+    name: Build Android (arm64-v8a) - Patched
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -50,291 +55,181 @@ jobs:
           EOF
           echo "✅ Created capacitor.config.ts"
 
-      - name: Install dependencies and Sharp
+      - name: Install dependencies (without scripts)
+        run: npm install --ignore-scripts
+
+      - name: Apply patches
+        run: npx patch-package || echo "::warning::Patch warnings (non-critical)"
+
+      - name: Install and verify Sharp
         run: |
-          npm install --ignore-scripts
-          npx patch-package || echo "::warning::Patch application may have warnings (non-critical)"
+          echo "Installing Sharp..."
           if npm install sharp; then
             echo "Rebuilding Sharp native bindings..."
-            npm rebuild sharp || echo "::warning::Sharp rebuild failed, will use default icons."
+            npm rebuild sharp || echo "::warning::Sharp rebuild failed"
+            
+            echo "Verifying Sharp..."
+            if node -e "require('sharp')" 2>/dev/null; then
+              echo "✅ Sharp is ready"
+            else
+              echo "::warning::Sharp verification failed - will use default icons"
+            fi
           else
-            echo "::warning::Sharp installation failed, will use default icons."
+            echo "::warning::Sharp install failed - will use default icons"
           fi
 
       - name: Add Android platform
         run: npx cap add android
 
-      - name: Create debug-bridge.js for WebView injection
-        run: |
-          mkdir -p android/app/src/main/assets
-          cat > android/app/src/main/assets/debug-bridge.js << 'JS_EOF'
-          // Injected Debug Bridge v1.1
-          (function() {
-              if (window.__DEBUG_BRIDGE_INITIALIZED__) return;
-              window.__DEBUG_BRIDGE_INITIALIZED__ = true;
-          
-              const originalConsole = { ...window.console };
-              const logToNative = (level, args) => {
-                  try {
-                      const message = args.map(arg => {
-                          if (arg instanceof Error) return arg.stack || arg.message;
-                          try {
-                            if (typeof arg === 'object' && arg !== null) return JSON.stringify(arg);
-                          } catch (e) { return '[Unserializable Object]'; }
-                          return String(arg);
-                      }).join(' ');
-                      
-                      if (window.AndroidBridge && typeof window.AndroidBridge.log === 'function') {
-                          window.AndroidBridge.log(`JS_CONSOLE_${level.toUpperCase()}: ${message}`);
-                      }
-                  } catch (e) {
-                      originalConsole.error('Debug bridge failed:', e);
-                  }
-              };
-          
-              Object.keys(originalConsole).forEach(level => {
-                  if (typeof originalConsole[level] === 'function') {
-                      window.console[level] = (...args) => {
-                          originalConsole[level](...args);
-                          logToNative(level, args);
-                      };
-                  }
-              });
-          
-              const originalFetch = window.fetch;
-              window.fetch = function(...args) {
-                  const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-                  const method = (args[0] instanceof Request ? args[0].method : (args[1]?.method || 'GET')).toUpperCase();
-                  logToNative('fetch', [`--> ${method} ${url}`]);
-                  
-                  return originalFetch.apply(this, args).then(response => {
-                      logToNative('fetch', [`<-- ${response.status} ${response.url}`]);
-                      return response;
-                  }).catch(error => {
-                      logToNative('error', [`FETCH_ERROR: ${error.message}`]);
-                      throw error;
-                  });
-              };
-          
-              console.log('✅ Injected Debug Bridge is active.');
-          })();
-          JS_EOF
-          echo "✅ Created debug-bridge.js in android assets"
-
-      - name: Inject Ultimate Debug MainActivity.java (FIXED)
+      - name: Inject Patched MainActivity for Debugging
         run: |
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
           
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
-
+          
           import android.Manifest;
           import android.content.pm.PackageManager;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Environment;
-          import android.webkit.JavascriptInterface;
-          import android.webkit.WebSettings;
+          import android.webkit.ConsoleMessage;
+          import android.webkit.WebChromeClient;
           import android.webkit.WebView;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
           import com.getcapacitor.BridgeActivity;
           import java.io.File;
           import java.io.FileWriter;
-          import java.io.IOException;
-          import java.io.InputStream;
           import java.io.PrintWriter;
           import java.text.SimpleDateFormat;
           import java.util.Date;
           import java.util.Locale;
-
+          
           public class MainActivity extends BridgeActivity {
-              private static final int REQUEST_STORAGE_PERMISSIONS = 1001;
-              private boolean hasStoragePermission = false;
-
-              private File publicLogFile;
-              private File privateExternalLogFile;
-              private File privateInternalLogFile;
-
-              private synchronized void writeToLogs(String message) {
-                  String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-                  String logLine = timestamp + " " + message;
-                  
-                  android.util.Log.d("ChatboxUltimateDebug", message);
-                  
-                  if (!hasStoragePermission) return;
-
-                  writeLogToFile(publicLogFile, logLine);
-                  writeLogToFile(privateExternalLogFile, logLine);
-                  writeLogToFile(privateInternalLogFile, logLine);
-              }
-
-              private void writeLogToFile(File file, String logLine) {
-                  if (file == null) return;
-                  try (FileWriter fw = new FileWriter(file, true);
-                       PrintWriter pw = new PrintWriter(fw)) {
-                      pw.println(logLine);
-                  } catch (IOException e) {
-                      android.util.Log.e("ChatboxUltimateDebug", "Failed to write to " + file.getAbsolutePath(), e);
+              private static final int REQUEST_STORAGE_PERMISSION = 1001;
+              private boolean permissionGranted = false;
+              private File logFile;
+              
+              private synchronized void log(String message) {
+                  try {
+                      android.util.Log.d("ChatboxDebug", message);
+                      if (!permissionGranted || logFile == null) return;
+                      String timestamp = new SimpleDateFormat("HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
+                      try (FileWriter fw = new FileWriter(logFile, true);
+                           PrintWriter pw = new PrintWriter(fw)) {
+                          pw.println(timestamp + " " + message);
+                      }
+                  } catch (Exception e) {
+                      android.util.Log.e("ChatboxDebug", "Failed to write log: " + e.getMessage());
                   }
               }
-
-              private void checkAndRequestPermissions() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                      hasStoragePermission = true;
+              
+              private void initializeLogFile() {
+                  if (permissionGranted) {
+                      File targetDir;
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                          targetDir = getExternalFilesDir(null);
+                      } else {
+                          targetDir = Environment.getExternalStorageDirectory();
+                      }
+                      if (targetDir != null) {
+                          logFile = new File(targetDir, "chatbox_debug.log");
+                          log("Log file will be written to: " + logFile.getAbsolutePath());
+                      } else {
+                          log("ERROR: Could not get target directory for log file.");
+                      }
+                  }
+              }
+              
+              private void checkAndRequestPermission() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                      permissionGranted = true;
+                      log("Android 10+: Using app-specific directory. No special permission needed.");
+                      initializeLogFile();
                       return;
                   }
+                  
                   if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-                      ActivityCompat.requestPermissions(this, new String[]{
-                          Manifest.permission.READ_EXTERNAL_STORAGE,
-                          Manifest.permission.WRITE_EXTERNAL_STORAGE
-                      }, REQUEST_STORAGE_PERMISSIONS);
+                      log("Requesting WRITE_EXTERNAL_STORAGE permission...");
+                      ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE_PERMISSION);
                   } else {
-                      hasStoragePermission = true;
+                      permissionGranted = true;
+                      log("WRITE_EXTERNAL_STORAGE permission already granted.");
+                      initializeLogFile();
                   }
               }
-
+              
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-                  if (requestCode == REQUEST_STORAGE_PERMISSIONS) {
+                  if (requestCode == REQUEST_STORAGE_PERMISSION) {
                       if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                          hasStoragePermission = true;
-                          writeToLogs("INFO: Storage permission granted by user.");
-                          initializeLogFiles();
+                          permissionGranted = true;
+                          log("Storage permission granted by user.");
+                          initializeLogFile();
                       } else {
-                          writeToLogs("ERROR: Storage permission DENIED by user.");
+                          log("Storage permission DENIED by user. Logging to file will fail!");
                       }
-                  }
-              }
-
-              private void initializeLogFiles() {
-                  if (hasStoragePermission) {
-                      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-                        publicLogFile = new File(Environment.getExternalStorageDirectory(), "chatbox_public_debug.log");
-                      }
-                      File externalDir = getExternalFilesDir(null);
-                      if (externalDir != null) {
-                          privateExternalLogFile = new File(externalDir, "chatbox_private_external.log");
-                      }
-                      privateInternalLogFile = new File(getFilesDir(), "chatbox_private_internal.log");
-                      
-                      writeToLogs("INFO: Log files initialized.");
-                      if (publicLogFile != null) writeToLogs(" - Public Log: " + publicLogFile.getAbsolutePath());
-                      if (privateExternalLogFile != null) writeToLogs(" - Private External Log: " + privateExternalLogFile.getAbsolutePath());
-                      if (privateInternalLogFile != null) writeToLogs(" - Private Internal Log: " + privateInternalLogFile.getAbsolutePath());
                   }
               }
               
-              public class AndroidBridge {
-                  @JavascriptInterface
-                  public void log(String message) {
-                      writeToLogs("JS_BRIDGE: " + message);
-                  }
-              }
-
               @Override
               public void onCreate(Bundle savedInstanceState) {
-                  checkAndRequestPermissions();
-                  initializeLogFiles();
-                  
-                  writeToLogs("=== MainActivity onCreate START (Ultimate Debug) ===");
-                  
+                  checkAndRequestPermission();
+                  log("=== MainActivity onCreate START ===");
                   super.onCreate(savedInstanceState);
+                  log("super.onCreate() completed");
                   
-                  WebView webView = getBridge().getWebView();
-                  if (webView != null) {
+                  if (bridge != null && bridge.getWebView() != null) {
+                      WebView webView = bridge.getWebView();
                       WebView.setWebContentsDebuggingEnabled(true);
-                      WebSettings settings = webView.getSettings();
-                      settings.setJavaScriptEnabled(true);
-                      webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
+                      log("WebView debugging enabled");
                       
-                      try {
-                          InputStream is = getAssets().open("debug-bridge.js");
-                          byte[] buffer = new byte[is.available()];
-                          is.read(buffer);
-                          is.close();
-                          String js = new String(buffer, "UTF-8");
-                          webView.evaluateJavascript(js, null);
-                          writeToLogs("INFO: Injected debug-bridge.js into WebView.");
-                      } catch (Exception e) {
-                          writeToLogs("ERROR: Failed to inject debug-bridge.js: " + e.getMessage());
-                      }
+                      webView.setWebChromeClient(new WebChromeClient() {
+                          @Override
+                          public boolean onConsoleMessage(ConsoleMessage cm) {
+                              log("WebView Console: [" + cm.messageLevel() + "] " + cm.message() + " -- " + cm.sourceId() + ":" + cm.lineNumber());
+                              return true;
+                          }
+                      });
+                      log("WebView console logging to file enabled");
                   } else {
-                       writeToLogs("ERROR: Bridge or WebView is null during onCreate!");
+                      log("WARNING: bridge or WebView is null!");
                   }
-                  writeToLogs("=== MainActivity onCreate COMPLETE ===");
-              }
-
-              // --- FIXED LIFECYCLE METHODS ---
-              @Override
-              public void onStart() {
-                  super.onStart();
-                  writeToLogs("=== onStart ===");
-              }
-              
-              @Override
-              public void onResume() {
-                  super.onResume();
-                  writeToLogs("=== onResume ===");
-              }
-              
-              @Override
-              public void onPause() {
-                  super.onPause();
-                  writeToLogs("=== onPause ===");
-              }
-              
-              @Override
-              public void onDestroy() {
-                  super.onDestroy();
-                  writeToLogs("=== onDestroy ===");
+                  log("=== MainActivity onCreate COMPLETE ===");
               }
           }
           JAVA_EOF
-          echo "✅ MainActivity injected with FIXED Ultimate Debug capabilities."
-
-      - name: Fix AndroidManifest.xml for full permissions and network
-        run: |
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
-          
-          # Add all necessary permissions
-          if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
-            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET" />' "$MANIFEST"
-          fi
-          if ! grep -q 'android.permission.READ_EXTERNAL_STORAGE' "$MANIFEST"; then
-            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />' "$MANIFEST"
-          fi
-          if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then
-            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"
-          fi
-          if ! grep -q 'android.permission.ACCESS_NETWORK_STATE' "$MANIFEST"; then
-            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />' "$MANIFEST"
-          fi
-          if ! grep -q 'android.permission.READ_CLIPBOARD' "$MANIFEST"; then
-            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_CLIPBOARD" />' "$MANIFEST"
-          fi
-          echo "✅ Added all necessary permissions to AndroidManifest.xml"
-
-          # Add permissive network security config
-          if ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
-            sed -i '/<application/a\        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
-          fi
-          if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then
-            sed -i '/<application/a\        android:usesCleartextTraffic="true"' "$MANIFEST"
-          fi
-
-          NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
-          mkdir -p "$(dirname "$NSC_FILE")"
-          echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
-          echo "✅ Added permissive network security config"
+          echo "✅ MainActivity patched with storage permission request and detailed logging."
       
       - name: Setup Java JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
+
+      - name: Cache Gradle Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Generate Android assets
+        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, using defaults"
+
+      - name: Accept SDK Licenses
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses || true
+
+      - name: Patch webpack config for mobile build
+        run: |
+          WEBPACK_CONFIG=".erb/configs/webpack.config.renderer.prod.ts"
+          sed -i "s/target: \['web', 'electron-renderer'\]/target: process.env.CHATBOX_BUILD_TARGET === 'mobile_app' ? ['web'] : ['web', 'electron-renderer']/" "$WEBPACK_CONFIG"
+          echo "✅ Webpack config patched for mobile build"
 
       - name: Build web assets
         run: |
@@ -344,8 +239,95 @@ jobs:
           export TS_NODE_TRANSPILE_ONLY=true
           npm run build:renderer
 
+      - name: Fix HTML for mobile
+        run: |
+          INDEX_HTML="release/app/dist/renderer/index.html"
+          if [ -f "$INDEX_HTML" ]; then
+            # 使用更可靠的 python 来处理，避免 sed 兼容性问题
+            python3 -c "import re; f='$INDEX_HTML'; c=open(f,'r+').read(); c=c.replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c);"
+            echo "✅ HTML processed for mobile compatibility"
+          else
+            echo "::error::index.html not found!"
+            exit 1
+          fi
+
       - name: Sync Capacitor assets
         run: npx cap sync android
+        
+      - name: Fix AndroidManifest.xml and Network Config
+        run: |
+          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          
+          # 1. 声明存储权限
+          if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"
+            echo "✅ Added WRITE_EXTERNAL_STORAGE permission"
+          fi
+          
+          # 2. 允许明文流量 (HTTP)
+          if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then
+            sed -i '/<application/a\        android:usesCleartextTraffic="true"' "$MANIFEST"
+            echo "✅ Added usesCleartextTraffic=true"
+          fi
+          
+          # 3. 指定网络安全配置
+          if ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
+            sed -i '/<application/a\        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
+            echo "✅ Added networkSecurityConfig attribute"
+          fi
+          
+          # 4. 创建一个开放的网络安全配置文件
+          NSC_DIR="android/app/src/main/res/xml"
+          mkdir -p "$NSC_DIR"
+          cat > "$NSC_DIR/network_security_config.xml" << 'XML_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <network-security-config>
+              <base-config cleartextTrafficPermitted="true">
+                  <trust-anchors>
+                      <certificates src="system" />
+                  </trust-anchors>
+              </base-config>
+          </network-security-config>
+          XML_EOF
+          echo "✅ Created permissive network_security_config.xml"
+
+      - name: Prepare release keystore
+        run: |
+          # (保留原版的签名逻辑)
+          mkdir -p .github/cache
+          if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > android/app/upload-keystore.jks
+            # ... (省略 secret 部分)
+          else
+            if [ -f ".github/cache/upload-keystore.jks" ]; then
+              cp .github/cache/upload-keystore.jks android/app/upload-keystore.jks
+            else
+              keytool -genkey -v -keystore android/app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
+              cp android/app/upload-keystore.jks .github/cache/upload-keystore.jks
+            fi
+            cat > android/key.properties << 'EOF'
+          storeFile=upload-keystore.jks
+          storePassword=android
+          keyAlias=androiddebugkey
+          keyPassword=android
+          EOF
+            echo "✅ Using auto-generated debug keystore"
+          fi
+
+      - name: Configure build.gradle
+        run: |
+          # (保留原版的 gradle 配置逻辑)
+          if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle; then
+            echo "" >> android/app/build.gradle
+            cat > android/app/arm64-config.gradle << 'EOF'
+          android {
+              splits { abi { enable false }; density { enable false } }
+              defaultConfig { ndk { abiFilters "arm64-v8a" } }
+          }
+          EOF
+            echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
+          fi
+          echo "✅ Gradle configured for arm64"
 
       - name: Build release APK
         run: |
@@ -357,24 +339,18 @@ jobs:
       - name: Package APK
         id: package_apk
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk/release -name "app-release-unsigned.apk" -o -name "app-release.apk" | head -n 1)
-          if [ -z "$APK_PATH" ]; then
-            echo "::error::Release APK not found!"
-            exit 1
-          fi
-          
+          APK=$(find android/app/build/outputs/apk/release -name "app-release.apk" | head -1)
+          [ -f "$APK" ] || { echo "::error::Signed APK not found"; exit 1; }
           VERSION=$(node -p "require('./package.json').version")
-          NAME="Chatbox-Debug-${VERSION}-arm64.apk"
-          
+          NAME="Chatbox-Patched-Auto-${VERSION}-arm64.apk"
           mkdir -p artifacts
-          cp "$APK_PATH" "artifacts/$NAME"
-          
+          cp "$APK" "artifacts/$NAME"
           echo "apk_name=$NAME" >> $GITHUB_OUTPUT
-          echo "✅ Packaged APK as $NAME"
+          echo "✅ Packaged as $NAME"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: chatbox-android-debug-apk
+          name: chatbox-android-patched-apk
           path: artifacts/${{ steps.package_apk.outputs.apk_name }}
           if-no-files-found: error
