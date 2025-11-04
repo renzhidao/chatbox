@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Final, Corrected & Fully Restored)
+name: Build Chatbox Android APK (Final, Perfected)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-android-arm64-final:
-    name: Build Android (arm64-v8a) - Final Corrected
+    name: Build Android (arm64-v8a) - Final & Perfected
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,21 +23,16 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Cache node_modules
+      - name: Cache Dependencies & Keystore
         uses: actions/cache@v4
         with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
-      - name: Cache Gradle Wrapper
-        uses: actions/cache@v4
-        with:
-          path: ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('**/gradle-wrapper.properties') }}
-      - name: Cache auto-generated keystore
-        uses: actions/cache@v4
-        with:
-          path: .github/cache/upload-keystore.jks
-          key: ${{ runner.os }}-auto-keystore
+          path: |
+            node_modules
+            ~/.gradle/wrapper
+            .github/cache/upload-keystore.jks
+          key: ${{ runner.os }}-build-cache-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-build-cache-
 
       - name: Install dependencies and Add platform
         run: |
@@ -61,25 +56,22 @@ jobs:
           java-version: '17'
           cache: 'gradle'
       
-      # --- [LOGO FIX] 修正了Logo生成和同步的顺序 ---
-      - name: Build Web, Fix HTML, Sync, then Generate Assets
+      - name: Build Web Content and Sync Project
         run: |
-          # 1. 构建 Web 内容
+          # 构建 Web 内容
           sed -i "s/target: \\['web', 'electron-renderer'\\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
           export CHATBOX_BUILD_TARGET=mobile_app
           npm run build:renderer
           
-          # 2. 修正 HTML
+          # 修正 HTML
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
           
-          # 3. 先同步，这会重置图标为默认
+          # 第一步：同步项目，重置原生配置
           npx cap sync android
-          
-          # 4. 最后生成资产，用您的自定义图标覆盖掉默认图标
-          npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
 
       - name: Patch Native Android Files
         run: |
+          # 第二步：在同步后的项目上，应用所有原生修改
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
@@ -151,7 +143,7 @@ jobs:
               }
           }
           JAVA_EOF
-          echo "✅ MainActivity injected from root."
+          echo "✅ MainActivity injected."
 
           MANIFEST="android/app/src/main/AndroidManifest.xml"
           if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"; fi
@@ -159,15 +151,18 @@ jobs:
           NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
-          echo "✅ AndroidManifest and Network Config patched from root."
+          echo "✅ AndroidManifest and Network Config patched."
 
-      - name: Prepare Keystore (Corrected)
+      # --- [ICON FIX] 第三步：在所有原生文件修改完成后，最后生成图标，确保不被覆盖 ---
+      - name: Generate Android Assets (Final Touch)
+        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, but continuing build."
+
+      - name: Prepare Keystore and Configure Gradle
         run: |
+          # 准备 Keystore
           KEYSTORE_DIR="android/app"
-          mkdir -p .github/cache
           mkdir -p "$KEYSTORE_DIR"
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
-            echo "✅ Using secrets to create keystore."
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_DIR/upload-keystore.jks"
             cat > "$KEYSTORE_DIR/key.properties" <<EOF
           storeFile=upload-keystore.jks
@@ -176,7 +171,6 @@ jobs:
           keyPassword=${{ secrets.KEY_PASSWORD }}
           EOF
           else
-            echo "✅ Using cached or new debug keystore."
             if [ -f ".github/cache/upload-keystore.jks" ]; then
               cp .github/cache/upload-keystore.jks "$KEYSTORE_DIR/upload-keystore.jks"
             else
@@ -190,16 +184,14 @@ jobs:
           keyPassword=android
           EOF
           fi
-          echo "✅ Keystore and key.properties created in $KEYSTORE_DIR"
+          echo "✅ Keystore and key.properties prepared."
 
-      - name: Configure build.gradle (Corrected)
-        run: |
+          # 配置 Gradle
           cat > android/app/arm64-config.gradle << 'EOF'
           def keystorePropertiesFile = file('key.properties')
           if (keystorePropertiesFile.exists()) {
               def keystoreProps = new Properties()
               keystoreProps.load(new FileInputStream(keystorePropertiesFile))
-              
               android {
                   signingConfigs {
                       release {
@@ -209,16 +201,8 @@ jobs:
                           keyPassword keystoreProps['keyPassword']
                       }
                   }
-                  buildTypes {
-                      release {
-                          signingConfig signingConfigs.release
-                      }
-                  }
-                  defaultConfig { 
-                      ndk { 
-                          abiFilters "arm64-v8a" 
-                      } 
-                  }
+                  buildTypes { release { signingConfig signingConfigs.release } }
+                  defaultConfig { ndk { abiFilters "arm64-v8a" } }
               }
           }
           EOF
@@ -226,26 +210,21 @@ jobs:
             echo "" >> android/app/build.gradle
             echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
           fi
-          echo "✅ build.gradle configured to use arm64-config.gradle."
+          echo "✅ build.gradle configured."
 
       - name: Build Release APK
         working-directory: ./android
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Package APK (Restored with robust logic)
+      - name: Package APK (Robust Logic)
         id: package_apk
         run: |
-          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
-          if [ ! -f "$APK_PATH" ]; then
-            echo "Standard 'app-release.apk' not found. Searching for other release APKs..."
-            APK_PATH=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*-unsigned.apk" | head -n 1)
-          fi
+          APK_PATH=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*-unsigned.apk" | head -n 1)
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
             echo "::error::Signed release APK not found!"
             ls -lR android/app/build/outputs/apk/release
             exit 1
           fi
-          echo "Found APK at: $APK_PATH"
           VERSION=$(node -p "require('./package.json').version")
           NAME="Chatbox-Patched-Final-${VERSION}-arm64.apk"
           mkdir -p artifacts
