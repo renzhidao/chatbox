@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Final Corrected Order)
+name: Build Chatbox Android APK (Final, Idempotent & Corrected)
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 
 jobs:
   build-android-arm64-final:
-    name: Build Android (arm64-v8a) - Final Corrected
+    name: Build Android (arm64-v8a) - Final Idempotent
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,14 +27,12 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      # --- 所有缓存步骤，完全恢复原版 ---
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-modules-
-
       - name: Cache Gradle Wrapper
         uses: actions/cache@v4
         with:
@@ -42,7 +40,6 @@ jobs:
             ~/.gradle/wrapper
             android/gradle/wrapper
           key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties') }}
-
       - name: Cache auto-generated keystore
         uses: actions/cache@v4
         with:
@@ -61,14 +58,17 @@ jobs:
         run: |
           npm install --ignore-scripts
           npx patch-package || true
-          if npm install sharp; then
-            npm rebuild sharp || echo "::warning::Sharp rebuild failed"
-          else
-            echo "::warning::Sharp install failed"
-          fi
+          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; fi
 
-      - name: Add Android platform
-        run: npx cap add android
+      # --- 核心修复：检查 android 目录是否存在，如果不存在才添加 ---
+      - name: Add Android platform (if not exists)
+        run: |
+          if [ ! -d "android" ]; then
+            echo "Android platform not found, adding it..."
+            npx cap add android
+          else
+            echo "Android platform already exists, skipping 'add' command."
+          fi
 
       - name: Setup Java and Gradle
         uses: actions/setup-java@v4
@@ -88,7 +88,7 @@ jobs:
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
           npx cap sync android
 
-      # --- 核心修复：所有原生文件修改，必须在 `npx cap sync` 之后！ ---
+      # --- 所有原生文件修改，必须在 `npx cap sync` 之后！ ---
       - name: Inject Patched MainActivity and Fix Manifest (Correct Order)
         run: |
           # 1. 注入带日志和权限请求的 MainActivity
@@ -113,11 +113,9 @@ jobs:
           import java.text.SimpleDateFormat;
           import java.util.Date;
           import java.util.Locale;
-
           public class MainActivity extends BridgeActivity {
               private static final int REQUEST_STORAGE_PERMISSION = 1001;
               private File logFile;
-
               private synchronized void log(String message) {
                   android.util.Log.d("ChatboxDebug", message);
                   if (logFile == null) return;
@@ -126,22 +124,13 @@ jobs:
                       pw.println(timestamp + " " + message);
                   } catch (Exception e) {}
               }
-
               private void initializeLogFile() {
-                  File targetDir;
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                      targetDir = getExternalFilesDir(null);
-                  } else {
-                      targetDir = Environment.getExternalStorageDirectory();
-                  }
+                  File targetDir = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ? getExternalFilesDir(null) : Environment.getExternalStorageDirectory();
                   if (targetDir != null && (targetDir.exists() || targetDir.mkdirs()) && targetDir.canWrite()) {
                       logFile = new File(targetDir, "chatbox_debug.log");
                       log("✅ Log file path set to: " + logFile.getAbsolutePath());
-                  } else {
-                      log("❌ ERROR: Cannot get a writable directory for log file.");
-                  }
+                  } else { log("❌ ERROR: Cannot get a writable directory for log file."); }
               }
-
               private void checkAndRequestPermission() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q || ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
                       initializeLogFile();
@@ -149,18 +138,14 @@ jobs:
                       ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQUEST_STORAGE_PERMISSION);
                   }
               }
-
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
                   if (requestCode == REQUEST_STORAGE_PERMISSION && grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                       log("✅ Storage permission granted by user.");
                       initializeLogFile();
-                  } else {
-                      log("❌ Storage permission DENIED by user.");
-                  }
+                  } else { log("❌ Storage permission DENIED by user."); }
               }
-
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
