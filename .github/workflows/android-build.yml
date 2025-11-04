@@ -61,16 +61,22 @@ jobs:
           java-version: '17'
           cache: 'gradle'
       
-      - name: Generate Android assets
-        run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
-      
-      - name: Build Web, Fix HTML, and Sync
+      # --- [LOGO FIX] 修正了Logo生成和同步的顺序 ---
+      - name: Build Web, Fix HTML, Sync, then Generate Assets
         run: |
+          # 1. 构建 Web 内容
           sed -i "s/target: \\['web', 'electron-renderer'\\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
           export CHATBOX_BUILD_TARGET=mobile_app
           npm run build:renderer
+          
+          # 2. 修正 HTML
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
+          
+          # 3. 先同步，这会重置图标为默认
           npx cap sync android
+          
+          # 4. 最后生成资产，用您的自定义图标覆盖掉默认图标
+          npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
 
       - name: Patch Native Android Files
         run: |
@@ -155,13 +161,11 @@ jobs:
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
           echo "✅ AndroidManifest and Network Config patched from root."
 
-      # --- [FIXED] 修正签名文件路径：所有文件都应在 'android/app' 目录下 ---
-      - name: Prepare Keystore
+      - name: Prepare Keystore (Corrected)
         run: |
-          KEYSTORE_DIR="android/app" # 这是正确的目录
+          KEYSTORE_DIR="android/app"
           mkdir -p .github/cache
           mkdir -p "$KEYSTORE_DIR"
-
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
             echo "✅ Using secrets to create keystore."
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_DIR/upload-keystore.jks"
@@ -188,11 +192,9 @@ jobs:
           fi
           echo "✅ Keystore and key.properties created in $KEYSTORE_DIR"
 
-      # --- [FIXED] 修正Gradle配置：使用更健壮的脚本正确加载签名信息 ---
-      - name: Configure build.gradle
+      - name: Configure build.gradle (Corrected)
         run: |
           cat > android/app/arm64-config.gradle << 'EOF'
-          // 此文件从 app/build.gradle 应用，因此路径相对于 'app' 目录
           def keystorePropertiesFile = file('key.properties')
           if (keystorePropertiesFile.exists()) {
               def keystoreProps = new Properties()
@@ -201,7 +203,6 @@ jobs:
               android {
                   signingConfigs {
                       release {
-                          // 从 key.properties 文件中正确读取 keystore 文件名和密码
                           storeFile file(keystoreProps['storeFile'])
                           storePassword keystoreProps['storePassword']
                           keyAlias keystoreProps['keyAlias']
@@ -213,7 +214,6 @@ jobs:
                           signingConfig signingConfigs.release
                       }
                   }
-                  // 保留您原来的 ABI 过滤器设置
                   defaultConfig { 
                       ndk { 
                           abiFilters "arm64-v8a" 
@@ -222,7 +222,6 @@ jobs:
               }
           }
           EOF
-          # 将配置应用到 app/build.gradle
           if ! grep -q "apply from: 'arm64-config.gradle'" android/app/build.gradle; then
             echo "" >> android/app/build.gradle
             echo "apply from: 'arm64-config.gradle'" >> android/app/build.gradle
@@ -233,15 +232,20 @@ jobs:
         working-directory: ./android
         run: ./gradlew assembleRelease --stacktrace
 
-      - name: Package APK
+      - name: Package APK (Restored with robust logic)
         id: package_apk
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk/release -type f -name "app-release.apk" | head -n 1)
+          APK_PATH="android/app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK_PATH" ]; then
+            echo "Standard 'app-release.apk' not found. Searching for other release APKs..."
+            APK_PATH=$(find android/app/build/outputs/apk/release -type f -name "*-release.apk" ! -name "*-unsigned.apk" | head -n 1)
+          fi
           if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
             echo "::error::Signed release APK not found!"
             ls -lR android/app/build/outputs/apk/release
             exit 1
           fi
+          echo "Found APK at: $APK_PATH"
           VERSION=$(node -p "require('./package.json').version")
           NAME="Chatbox-Patched-Final-${VERSION}-arm64.apk"
           mkdir -p artifacts
@@ -254,4 +258,3 @@ jobs:
           name: chatbox-android-patched-apk
           path: artifacts/${{ steps.package_apk.outputs.apk_name }}
           if-no-files-found: error
-
