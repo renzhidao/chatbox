@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Ultimate Debug Edition v2)
+name: Build Chatbox Android APK (Ultimate Debug Edition v3 - Fixed)
 
 on:
   workflow_dispatch:
@@ -68,7 +68,7 @@ jobs:
         run: |
           mkdir -p android/app/src/main/assets
           cat > android/app/src/main/assets/debug-bridge.js << 'JS_EOF'
-          // Injected Debug Bridge v1.0
+          // Injected Debug Bridge v1.1
           (function() {
               if (window.__DEBUG_BRIDGE_INITIALIZED__) return;
               window.__DEBUG_BRIDGE_INITIALIZED__ = true;
@@ -121,22 +121,21 @@ jobs:
           JS_EOF
           echo "✅ Created debug-bridge.js in android assets"
 
-      - name: Inject Ultimate Debug MainActivity.java
+      - name: Inject Ultimate Debug MainActivity.java (FIXED)
         run: |
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
           
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
-          
+
           import android.Manifest;
           import android.content.pm.PackageManager;
           import android.os.Build;
           import android.os.Bundle;
           import android.os.Environment;
           import android.webkit.JavascriptInterface;
-          import android.webkit.ConsoleMessage;
-          import android.webkit.WebChromeClient;
+          import android.webkit.WebSettings;
           import android.webkit.WebView;
           import androidx.core.app.ActivityCompat;
           import androidx.core.content.ContextCompat;
@@ -153,11 +152,11 @@ jobs:
           public class MainActivity extends BridgeActivity {
               private static final int REQUEST_STORAGE_PERMISSIONS = 1001;
               private boolean hasStoragePermission = false;
-          
+
               private File publicLogFile;
               private File privateExternalLogFile;
               private File privateInternalLogFile;
-          
+
               private synchronized void writeToLogs(String message) {
                   String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
                   String logLine = timestamp + " " + message;
@@ -165,12 +164,12 @@ jobs:
                   android.util.Log.d("ChatboxUltimateDebug", message);
                   
                   if (!hasStoragePermission) return;
-          
+
                   writeLogToFile(publicLogFile, logLine);
                   writeLogToFile(privateExternalLogFile, logLine);
                   writeLogToFile(privateInternalLogFile, logLine);
               }
-          
+
               private void writeLogToFile(File file, String logLine) {
                   if (file == null) return;
                   try (FileWriter fw = new FileWriter(file, true);
@@ -180,13 +179,12 @@ jobs:
                       android.util.Log.e("ChatboxUltimateDebug", "Failed to write to " + file.getAbsolutePath(), e);
                   }
               }
-          
+
               private void checkAndRequestPermissions() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                       hasStoragePermission = true;
                       return;
                   }
-          
                   if (ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
                       ActivityCompat.requestPermissions(this, new String[]{
                           Manifest.permission.READ_EXTERNAL_STORAGE,
@@ -196,7 +194,7 @@ jobs:
                       hasStoragePermission = true;
                   }
               }
-          
+
               @Override
               public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
                   super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -210,7 +208,7 @@ jobs:
                       }
                   }
               }
-          
+
               private void initializeLogFiles() {
                   if (hasStoragePermission) {
                       if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
@@ -223,9 +221,9 @@ jobs:
                       privateInternalLogFile = new File(getFilesDir(), "chatbox_private_internal.log");
                       
                       writeToLogs("INFO: Log files initialized.");
-                      if (publicLogFile != null) writeToLogs(" - Public: " + publicLogFile.getAbsolutePath());
-                      if (privateExternalLogFile != null) writeToLogs(" - Private External: " + privateExternalLogFile.getAbsolutePath());
-                      if (privateInternalLogFile != null) writeToLogs(" - Private Internal: " + privateInternalLogFile.getAbsolutePath());
+                      if (publicLogFile != null) writeToLogs(" - Public Log: " + publicLogFile.getAbsolutePath());
+                      if (privateExternalLogFile != null) writeToLogs(" - Private External Log: " + privateExternalLogFile.getAbsolutePath());
+                      if (privateInternalLogFile != null) writeToLogs(" - Private Internal Log: " + privateInternalLogFile.getAbsolutePath());
                   }
               }
               
@@ -235,7 +233,7 @@ jobs:
                       writeToLogs("JS_BRIDGE: " + message);
                   }
               }
-          
+
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   checkAndRequestPermissions();
@@ -245,10 +243,11 @@ jobs:
                   
                   super.onCreate(savedInstanceState);
                   
-                  WebView webView = bridge.getWebView();
+                  WebView webView = getBridge().getWebView();
                   if (webView != null) {
                       WebView.setWebContentsDebuggingEnabled(true);
-                      webView.getSettings().setJavaScriptEnabled(true);
+                      WebSettings settings = webView.getSettings();
+                      settings.setJavaScriptEnabled(true);
                       webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
                       
                       try {
@@ -267,9 +266,34 @@ jobs:
                   }
                   writeToLogs("=== MainActivity onCreate COMPLETE ===");
               }
+
+              // --- FIXED LIFECYCLE METHODS ---
+              @Override
+              public void onStart() {
+                  super.onStart();
+                  writeToLogs("=== onStart ===");
+              }
+              
+              @Override
+              public void onResume() {
+                  super.onResume();
+                  writeToLogs("=== onResume ===");
+              }
+              
+              @Override
+              public void onPause() {
+                  super.onPause();
+                  writeToLogs("=== onPause ===");
+              }
+              
+              @Override
+              public void onDestroy() {
+                  super.onDestroy();
+                  writeToLogs("=== onDestroy ===");
+              }
           }
           JAVA_EOF
-          echo "✅ MainActivity injected with Ultimate Debug capabilities."
+          echo "✅ MainActivity injected with FIXED Ultimate Debug capabilities."
 
       - name: Fix AndroidManifest.xml for full permissions and network
         run: |
