@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Final, Idempotent & Corrected)
+name: Build Chatbox Android APK (Final, Corrected Order & Fully Restored)
 
 on:
   push:
@@ -12,7 +12,7 @@ on:
 
 jobs:
   build-android-arm64-final:
-    name: Build Android (arm64-v8a) - Final Idempotent
+    name: Build Android (arm64-v8a) - Final Corrected
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -27,12 +27,14 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      # --- 所有缓存步骤，完全恢复原版 ---
+      # --- 缓存步骤，100% 恢复你成功的原版 ---
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-
       - name: Cache Gradle Wrapper
         uses: actions/cache@v4
         with:
@@ -58,9 +60,8 @@ jobs:
         run: |
           npm install --ignore-scripts
           npx patch-package || true
-          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; fi
+          if npm install sharp; then npm rebuild sharp || echo "::warning::Sharp rebuild failed"; else echo "::warning::Sharp install failed"; fi
 
-      # --- 核心修复：检查 android 目录是否存在，如果不存在才添加 ---
       - name: Add Android platform (if not exists)
         run: |
           if [ ! -d "android" ]; then
@@ -77,7 +78,7 @@ jobs:
           java-version: '17'
           cache: 'gradle'
       
-      - name: Generate Android assets
+      - name: Generate Android assets (original restored)
         run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed"
       
       - name: Build Web, Fix HTML, and Sync
@@ -88,8 +89,8 @@ jobs:
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
           npx cap sync android
 
-      # --- 所有原生文件修改，必须在 `npx cap sync` 之后！ ---
-      - name: Inject Patched MainActivity and Fix Manifest (Correct Order)
+      # --- 核心修复：所有原生文件修改，必须在 `npx cap sync` 之后！ ---
+      - name: Patch Native Android Files (Correct Order)
         run: |
           # 1. 注入带日志和权限请求的 MainActivity
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
