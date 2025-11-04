@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Ultimate Debug Edition)
+name: Build Chatbox Android APK (Ultimate Debug Edition v2)
 
 on:
   workflow_dispatch:
@@ -23,17 +23,42 @@ jobs:
         with:
           node-version: 20
           cache: 'npm'
-      
-      # ... (前面和原来一样的缓存、配置步骤，为简洁省略，下面是核心修改) ...
+
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-
+
+      - name: Create capacitor.config.ts
+        run: |
+          cat > capacitor.config.ts << 'EOF'
+          import { CapacitorConfig } from '@capacitor/cli';
+          
+          const config: CapacitorConfig = {
+            appId: 'xyz.chatboxapp.ce',
+            appName: 'Chatbox',
+            webDir: 'release/app/dist/renderer',
+            plugins: {
+              CapacitorHttp: { enabled: true },
+            },
+          };
+          
+          export default config;
+          EOF
+          echo "✅ Created capacitor.config.ts"
 
       - name: Install dependencies and Sharp
         run: |
           npm install --ignore-scripts
-          npx patch-package || echo "::warning::Patch warnings"
+          npx patch-package || echo "::warning::Patch application may have warnings (non-critical)"
           if npm install sharp; then
-            npm rebuild sharp || echo "::warning::Sharp rebuild failed"
+            echo "Rebuilding Sharp native bindings..."
+            npm rebuild sharp || echo "::warning::Sharp rebuild failed, will use default icons."
           else
-            echo "::warning::Sharp install failed"
+            echo "::warning::Sharp installation failed, will use default icons."
           fi
 
       - name: Add Android platform
@@ -48,20 +73,19 @@ jobs:
               if (window.__DEBUG_BRIDGE_INITIALIZED__) return;
               window.__DEBUG_BRIDGE_INITIALIZED__ = true;
           
-              // 1. 捕获所有 console 输出
               const originalConsole = { ...window.console };
               const logToNative = (level, args) => {
                   try {
                       const message = args.map(arg => {
-                          if (arg instanceof Error) return arg.stack;
-                          if (typeof arg === 'object') return JSON.stringify(arg);
+                          if (arg instanceof Error) return arg.stack || arg.message;
+                          try {
+                            if (typeof arg === 'object' && arg !== null) return JSON.stringify(arg);
+                          } catch (e) { return '[Unserializable Object]'; }
                           return String(arg);
                       }).join(' ');
                       
                       if (window.AndroidBridge && typeof window.AndroidBridge.log === 'function') {
                           window.AndroidBridge.log(`JS_CONSOLE_${level.toUpperCase()}: ${message}`);
-                      } else {
-                          originalConsole.log(`(Native bridge not ready) ${level}: ${message}`);
                       }
                   } catch (e) {
                       originalConsole.error('Debug bridge failed:', e);
@@ -77,14 +101,11 @@ jobs:
                   }
               });
           
-              // 2. 捕获所有 fetch 请求
               const originalFetch = window.fetch;
               window.fetch = function(...args) {
-                  try {
-                      const url = args[0] instanceof Request ? args[0].url : String(args[0]);
-                      const method = (args[0] instanceof Request ? args[0].method : (args[1]?.method || 'GET')).toUpperCase();
-                      logToNative('fetch', [`--> ${method} ${url}`]);
-                  } catch {}
+                  const url = args[0] instanceof Request ? args[0].url : String(args[0]);
+                  const method = (args[0] instanceof Request ? args[0].method : (args[1]?.method || 'GET')).toUpperCase();
+                  logToNative('fetch', [`--> ${method} ${url}`]);
                   
                   return originalFetch.apply(this, args).then(response => {
                       logToNative('fetch', [`<-- ${response.status} ${response.url}`]);
@@ -95,10 +116,10 @@ jobs:
                   });
               };
           
-              console.log('✅ Injected Debug Bridge is active. All console logs and fetch requests are being monitored.');
+              console.log('✅ Injected Debug Bridge is active.');
           })();
           JS_EOF
-          echo "✅ Created debug-bridge.js"
+          echo "✅ Created debug-bridge.js in android assets"
 
       - name: Inject Ultimate Debug MainActivity.java
         run: |
@@ -109,7 +130,6 @@ jobs:
           package xyz.chatboxapp.ce;
           
           import android.Manifest;
-          import android.content.Context;
           import android.content.pm.PackageManager;
           import android.os.Build;
           import android.os.Bundle;
@@ -124,31 +144,28 @@ jobs:
           import java.io.File;
           import java.io.FileWriter;
           import java.io.IOException;
+          import java.io.InputStream;
           import java.io.PrintWriter;
           import java.text.SimpleDateFormat;
           import java.util.Date;
           import java.util.Locale;
-          
+
           public class MainActivity extends BridgeActivity {
               private static final int REQUEST_STORAGE_PERMISSIONS = 1001;
               private boolean hasStoragePermission = false;
           
-              // 日志文件路径
               private File publicLogFile;
               private File privateExternalLogFile;
               private File privateInternalLogFile;
           
-              // 日志记录的核心方法
               private synchronized void writeToLogs(String message) {
                   String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
                   String logLine = timestamp + " " + message;
                   
-                  // 打印到 Logcat (系统日志)
                   android.util.Log.d("ChatboxUltimateDebug", message);
                   
                   if (!hasStoragePermission) return;
           
-                  // 同时写入三个文件
                   writeLogToFile(publicLogFile, logLine);
                   writeLogToFile(privateExternalLogFile, logLine);
                   writeLogToFile(privateInternalLogFile, logLine);
@@ -164,12 +181,9 @@ jobs:
                   }
               }
           
-              // 权限检查与请求
               private void checkAndRequestPermissions() {
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                      // Android 11+，不再需要 WRITE_EXTERNAL_STORAGE
                       hasStoragePermission = true;
-                      writeToLogs("INFO: Android 11+ storage permission is implicitly granted for app-specific directories.");
                       return;
                   }
           
@@ -190,33 +204,31 @@ jobs:
                       if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                           hasStoragePermission = true;
                           writeToLogs("INFO: Storage permission granted by user.");
-                          initializeLogFiles(); // 权限获取后再次初始化
+                          initializeLogFiles();
                       } else {
-                          writeToLogs("ERROR: Storage permission DENIED by user. Logging to files will fail.");
+                          writeToLogs("ERROR: Storage permission DENIED by user.");
                       }
                   }
               }
           
               private void initializeLogFiles() {
                   if (hasStoragePermission) {
-                      // 公共目录
-                      publicLogFile = new File(Environment.getExternalStorageDirectory(), "chatbox_public_debug.log");
-                      // 私有外部目录
+                      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                        publicLogFile = new File(Environment.getExternalStorageDirectory(), "chatbox_public_debug.log");
+                      }
                       File externalDir = getExternalFilesDir(null);
                       if (externalDir != null) {
                           privateExternalLogFile = new File(externalDir, "chatbox_private_external.log");
                       }
-                      // 私有内部目录
                       privateInternalLogFile = new File(getFilesDir(), "chatbox_private_internal.log");
                       
                       writeToLogs("INFO: Log files initialized.");
-                      writeToLogs(" - Public: " + (publicLogFile != null ? publicLogFile.getAbsolutePath() : "N/A"));
-                      writeToLogs(" - Private External: " + (privateExternalLogFile != null ? privateExternalLogFile.getAbsolutePath() : "N/A"));
-                      writeToLogs(" - Private Internal: " + (privateInternalLogFile != null ? privateInternalLogFile.getAbsolutePath() : "N/A"));
+                      if (publicLogFile != null) writeToLogs(" - Public: " + publicLogFile.getAbsolutePath());
+                      if (privateExternalLogFile != null) writeToLogs(" - Private External: " + privateExternalLogFile.getAbsolutePath());
+                      if (privateInternalLogFile != null) writeToLogs(" - Private Internal: " + privateInternalLogFile.getAbsolutePath());
                   }
               }
               
-              // 提供给 JavaScript 调用的接口
               public class AndroidBridge {
                   @JavascriptInterface
                   public void log(String message) {
@@ -230,8 +242,7 @@ jobs:
                   initializeLogFiles();
                   
                   writeToLogs("=== MainActivity onCreate START (Ultimate Debug) ===");
-                  writeToLogs("Android Version: " + Build.VERSION.SDK_INT);
-          
+                  
                   super.onCreate(savedInstanceState);
                   
                   WebView webView = bridge.getWebView();
@@ -240,9 +251,8 @@ jobs:
                       webView.getSettings().setJavaScriptEnabled(true);
                       webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
                       
-                      // 注入 JS 调试桥
                       try {
-                          java.io.InputStream is = getAssets().open("debug-bridge.js");
+                          InputStream is = getAssets().open("debug-bridge.js");
                           byte[] buffer = new byte[is.available()];
                           is.read(buffer);
                           is.close();
@@ -252,15 +262,6 @@ jobs:
                       } catch (Exception e) {
                           writeToLogs("ERROR: Failed to inject debug-bridge.js: " + e.getMessage());
                       }
-                      
-                      webView.setWebChromeClient(new WebChromeClient() {
-                          @Override
-                          public boolean onConsoleMessage(ConsoleMessage cm) {
-                              // 这个日志现在由 JS Bridge 捕获，这里可以保留作为备用
-                              // writeToLogs("NATIVE_CONSOLE: [" + cm.messageLevel() + "] " + cm.message());
-                              return true;
-                          }
-                      });
                   } else {
                        writeToLogs("ERROR: Bridge or WebView is null during onCreate!");
                   }
@@ -273,48 +274,83 @@ jobs:
       - name: Fix AndroidManifest.xml for full permissions and network
         run: |
           MANIFEST="android/app/src/main/AndroidManifest.xml"
-          # 1. 添加所有必要的权限
-          sed -i '/<manifest/a\
-              <uses-permission android:name="android.permission.INTERNET" />\
-              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />\
-              <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />\
-              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />\
-              <uses-permission android:name="android.permission.READ_CLIPBOARD" />' "$MANIFEST"
+          
+          # Add all necessary permissions
+          if ! grep -q 'android.permission.INTERNET' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.INTERNET" />' "$MANIFEST"
+          fi
+          if ! grep -q 'android.permission.READ_EXTERNAL_STORAGE' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />' "$MANIFEST"
+          fi
+          if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"
+          fi
+          if ! grep -q 'android.permission.ACCESS_NETWORK_STATE' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />' "$MANIFEST"
+          fi
+          if ! grep -q 'android.permission.READ_CLIPBOARD' "$MANIFEST"; then
+            sed -i '/<manifest/a\    <uses-permission android:name="android.permission.READ_CLIPBOARD" />' "$MANIFEST"
+          fi
           echo "✅ Added all necessary permissions to AndroidManifest.xml"
 
-          # 2. 添加网络安全配置 (允许所有 http 流量)
-          sed -i '/<application/a\        android:usesCleartextTraffic="true"\
-              android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
+          # Add permissive network security config
+          if ! grep -q 'android:networkSecurityConfig' "$MANIFEST"; then
+            sed -i '/<application/a\        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"
+          fi
+          if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then
+            sed -i '/<application/a\        android:usesCleartextTraffic="true"' "$MANIFEST"
+          fi
+
           NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
           echo "✅ Added permissive network security config"
       
-      # ... (后续的 build, package, upload 步骤和原来一样，为简洁省略) ...
+      - name: Setup Java JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
 
       - name: Build web assets
         run: |
           export CHATBOX_BUILD_TARGET=mobile_app
+          export CHATBOX_BUILD_PLATFORM=android
           export NODE_ENV=production
+          export TS_NODE_TRANSPILE_ONLY=true
           npm run build:renderer
+
       - name: Sync Capacitor assets
         run: npx cap sync android
+
       - name: Build release APK
         run: |
           cd android
           chmod +x gradlew
-          ./gradlew assembleRelease --stacktrace
+          ./gradlew assembleRelease --stacktrace --build-cache
           cd ..
-      - name: Package and Upload APK
+
+      - name: Package APK
+        id: package_apk
         run: |
-          APK_PATH=$(find android/app/build/outputs/apk/release -name "*-release.apk" | head -1)
-          [ -f "$APK_PATH" ] || { echo "::error::APK not found"; exit 1; }
+          APK_PATH=$(find android/app/build/outputs/apk/release -name "app-release-unsigned.apk" -o -name "app-release.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "::error::Release APK not found!"
+            exit 1
+          fi
+          
           VERSION=$(node -p "require('./package.json').version")
           NAME="Chatbox-Debug-${VERSION}-arm64.apk"
+          
           mkdir -p artifacts
           cp "$APK_PATH" "artifacts/$NAME"
-          echo "✅ Packaged as $NAME"
+          
+          echo "apk_name=$NAME" >> $GITHUB_OUTPUT
+          echo "✅ Packaged APK as $NAME"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: chatbox-android-debug-apk
-          path: artifacts/Chatbox-Debug-*-arm64.apk
+          path: artifacts/${{ steps.package_apk.outputs.apk_name }}
+          if-no-files-found: error
