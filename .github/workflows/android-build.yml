@@ -58,20 +58,14 @@ jobs:
       
       - name: Build Web Content and Sync Project
         run: |
-          # 构建 Web 内容
           sed -i "s/target: \\['web', 'electron-renderer'\\]/target: ['web']/" .erb/configs/webpack.config.renderer.prod.ts
           export CHATBOX_BUILD_TARGET=mobile_app
           npm run build:renderer
-          
-          # 修正 HTML
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
-          
-          # 第一步：同步项目，重置原生配置
           npx cap sync android
 
       - name: Patch Native Android Files
         run: |
-          # 第二步：在同步后的项目上，应用所有原生修改
           MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
@@ -153,16 +147,19 @@ jobs:
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
           echo "✅ AndroidManifest and Network Config patched."
 
-      # --- [ICON FIX] 第三步：在所有原生文件修改完成后，最后生成图标，确保不被覆盖 ---
       - name: Generate Android Assets (Final Touch)
         run: npx capacitor-assets generate --android || echo "::warning::Asset generation failed, but continuing build."
 
-      - name: Prepare Keystore and Configure Gradle
+      - name: Prepare Keystore, Create Cache Dir, & Configure Gradle
         run: |
+          # --- [CACHE FIX] 确保缓存目录存在，防止cp命令失败 ---
+          mkdir -p .github/cache
+
           # 准备 Keystore
           KEYSTORE_DIR="android/app"
           mkdir -p "$KEYSTORE_DIR"
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
+            echo "✅ Using secrets for release signing."
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > "$KEYSTORE_DIR/upload-keystore.jks"
             cat > "$KEYSTORE_DIR/key.properties" <<EOF
           storeFile=upload-keystore.jks
@@ -171,6 +168,7 @@ jobs:
           keyPassword=${{ secrets.KEY_PASSWORD }}
           EOF
           else
+            echo "✅ Using cached or new debug keystore."
             if [ -f ".github/cache/upload-keystore.jks" ]; then
               cp .github/cache/upload-keystore.jks "$KEYSTORE_DIR/upload-keystore.jks"
             else
