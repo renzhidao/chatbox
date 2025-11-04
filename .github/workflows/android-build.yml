@@ -1,4 +1,4 @@
-name: Build Chatbox Android APK (Final, Path Corrected)
+name: Build Chatbox Android APK (Final, Corrected & Fully Unified)
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   build-android-arm64-final:
-    name: Build Android (arm64-v8a) - Final Path Corrected
+    name: Build Android (arm64-v8a) - Final Unified
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -23,11 +23,22 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      # --- 所有准备步骤，100% 恢复你成功的原版 ---
       - name: Cache node_modules
         uses: actions/cache@v4
         with:
           path: node_modules
           key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+      - name: Cache Gradle Wrapper
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-wrapper-${{ hashFiles('**/gradle-wrapper.properties') }}
+      - name: Cache auto-generated keystore
+        uses: actions/cache@v4
+        with:
+          path: .github/cache/upload-keystore.jks
+          key: ${{ runner.os }}-auto-keystore
 
       - name: Install dependencies and Add platform
         run: |
@@ -62,12 +73,13 @@ jobs:
           python3 -c "import re; f='release/app/dist/renderer/index.html'; c=open(f).read().replace('%PUBLIC_URL%','.'); c=re.sub(r'<script[^>]*src=\"https://www\.googletagmanager\.com[^>]*></script>','',c); open(f,'w').write(c)"
           npx cap sync android
 
-      # --- 核心修复 1: 在根目录执行所有原生文件修改，使用完整路径 ---
-      - name: Patch Native Android Files
+      # --- 核心修复：将所有原生操作合并到一个步骤，并强制在正确的目录下执行 ---
+      - name: Patch, Configure, and Build Android Native Project
+        working-directory: ./android  # <--- 关键！所有后续操作都在这个目录下
         run: |
-          MAIN_JAVA="android/app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
+          # 1. 注入带日志和权限请求的 MainActivity (路径现在是相对 ./android 的)
+          MAIN_JAVA="app/src/main/java/xyz/chatboxapp/ce/MainActivity.java"
           mkdir -p "$(dirname "$MAIN_JAVA")"
-          # (注入 MainActivity.java 的代码保持不变)
           cat > "$MAIN_JAVA" << 'JAVA_EOF'
           package xyz.chatboxapp.ce;
           import android.Manifest;
@@ -137,19 +149,19 @@ jobs:
               }
           }
           JAVA_EOF
+          echo "✅ MainActivity injected inside ./android directory."
 
-          MANIFEST="android/app/src/main/AndroidManifest.xml"
+          # 2. 修改 AndroidManifest 和网络配置 (路径现在是相对 ./android 的)
+          MANIFEST="app/src/main/AndroidManifest.xml"
           if ! grep -q 'android.permission.WRITE_EXTERNAL_STORAGE' "$MANIFEST"; then sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29" />' "$MANIFEST"; fi
           if ! grep -q 'android:usesCleartextTraffic' "$MANIFEST"; then sed -i '/<application/a\        android:usesCleartextTraffic="true"\n        android:networkSecurityConfig="@xml/network_security_config"' "$MANIFEST"; fi
-          NSC_FILE="android/app/src/main/res/xml/network_security_config.xml"
+          NSC_FILE="app/src/main/res/xml/network_security_config.xml"
           mkdir -p "$(dirname "$NSC_FILE")"
           echo '<?xml version="1.0" encoding="utf-8"?><network-security-config><base-config cleartextTrafficPermitted="true"><trust-anchors><certificates src="system" /></trust-anchors></base-config></network-security-config>' > "$NSC_FILE"
-      
-      # --- 核心修复 2: 签名和构建步骤合并，并强制在正确的目录下执行 ---
-      - name: Prepare Keystore, Configure Gradle, and Build APK
-        working-directory: ./android  # <--- 关键！所有后续操作都在这个目录下
-        run: |
-          # 1. 准备 Keystore (路径现在是相对 ./android 的)
+          echo "✅ AndroidManifest and Network Config patched."
+
+          # 3. 准备 Keystore (路径现在是相对 ./android 的，并且使用 ../ 回到根目录访问缓存)
+          mkdir -p ../.github/cache
           if [ -n "${{ secrets.SIGN_KEYSTORE_BASE64 }}" ]; then
             echo "${{ secrets.SIGN_KEYSTORE_BASE64 }}" | base64 -d > app/upload-keystore.jks
             cat > key.properties <<EOF
@@ -159,7 +171,12 @@ jobs:
           keyPassword=${{ secrets.KEY_PASSWORD }}
           EOF
           else
-            keytool -genkey -v -keystore app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
+            if [ -f "../.github/cache/upload-keystore.jks" ]; then
+              cp ../.github/cache/upload-keystore.jks app/upload-keystore.jks
+            else
+              keytool -genkey -v -keystore app/upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -alias androiddebugkey -dname "CN=Chatbox,O=Chatbox,C=CN"
+              cp app/upload-keystore.jks ../.github/cache/upload-keystore.jks
+            fi
             cat > key.properties <<EOF
           storeFile=app/upload-keystore.jks
           storePassword=android
@@ -169,14 +186,14 @@ jobs:
           fi
           echo "✅ Keystore prepared."
 
-          # 2. 配置 Gradle (路径现在是相对 ./android 的)
+          # 4. 配置 Gradle (路径现在是相对 ./android 的)
           cat > app/arm64-config.gradle << 'EOF'
           def keystoreFile = rootProject.file('key.properties')
           def keystoreProps = new Properties()
           if (keystoreFile.exists()) { keystoreProps.load(new FileInputStream(keystoreFile)) }
           android {
               if (keystoreFile.exists()) {
-                  signingConfigs { release { storeFile file('app/upload-keystore.jks'); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }
+                  signingConfigs { release { storeFile file(keystoreFile.name); storePassword keystoreProps['storePassword']; keyAlias keystoreProps['keyAlias']; keyPassword keystoreProps['keyPassword'] } }
                   buildTypes { release { signingConfig signingConfigs.release } }
               }
               defaultConfig { ndk { abiFilters "arm64-v8a" } }
@@ -188,7 +205,7 @@ jobs:
           fi
           echo "✅ Gradle configured."
 
-          # 3. 执行构建
+          # 5. 执行构建
           chmod +x ./gradlew
           ./gradlew assembleRelease --stacktrace
           echo "✅ Build command executed."
